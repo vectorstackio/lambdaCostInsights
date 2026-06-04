@@ -1,0 +1,30 @@
+{
+  "name": "costinsights",
+  "version": "1.0.0",
+  "description": "Lambda function to provide cost data",
+  "license": "ISC",
+  "author": "Mike Garthwaite",
+  "type": "module",
+  "main": "handler.ts",
+  "scripts": {
+    "test": "test",
+    "lint": "eslint src",
+    "build": "node esbuild.mjs",
+    "zip": "cd dist && zip -r function.zip .",
+    "deploy": "npm run lint && npm run build && npm run zip && bash scripts/deploy.sh"
+  },
+  "dependencies": {
+    "@aws-sdk/client-compute-optimizer": "^3.1060.0",
+    "@aws-sdk/client-cost-explorer": "^3.1060.0",
+    "@aws-sdk/client-cost-optimization-hub": "^3.1060.0",
+    "dotenv": "^17.4.2"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.60.1",
+    "@typescript-eslint/parser": "^8.60.1",
+    "esbuild": "^0.25.12",
+    "eslint": "^9.39.4",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.60.1"
+  }
+}
