@@ -26,6 +26,7 @@ type SummaryResponse = {
   currentMonthCost: number
   potentialSavings: number
   recommendationCount: number
+  byService: ServiceCost[]
   topRecommendations: TopRecommendation[]
 }
 
@@ -35,6 +36,11 @@ type AWSRecommendation = {
   actionType?: string
   currentResourceSummary?: string
   recommendedResourceSummary?: string
+}
+
+type ServiceCost = {
+  service: string
+  cost: number
 }
 
 /**
@@ -88,9 +94,18 @@ export const handler = async (): Promise<{
 
   const costRes = await ce.send(
     new GetCostAndUsageCommand({
-      TimePeriod: { Start: start, End: end },
+      TimePeriod: {
+        Start: start,
+        End: end
+      },
       Granularity: 'MONTHLY',
-      Metrics: ['UnblendedCost']
+      Metrics: ['UnblendedCost'],
+      GroupBy: [
+        {
+          Type: 'DIMENSION',
+          Key: 'SERVICE'
+        }
+      ]
     })
   )
 
@@ -106,6 +121,25 @@ export const handler = async (): Promise<{
   /**
    * 2. TRANSFORM LAYER
    */
+  // Service breakdown
+  const byService: ServiceCost[] =
+    costRes.ResultsByTime?.[0]?.Groups?.map((group) => ({
+      service: group.Keys?.[0] ?? 'Unknown',
+      cost: Number(
+        parseFloat(
+          group.Metrics?.UnblendedCost?.Amount ?? '0'
+        ).toFixed(2)
+      )
+    })) ?? []
+
+  // Total monthly cost
+  const currentMonthCost = Number(
+    byService
+      .reduce((sum, service) => sum + service.cost, 0)
+      .toFixed(2)
+  )
+
+  // Savings + recommendations
   let potentialSavings = 0
 
   const topRecommendations: TopRecommendation[] = recommendations.map((r) => {
@@ -113,20 +147,20 @@ export const handler = async (): Promise<{
     return mapRecommendation(r)
   })
 
-  const currentMonthCost = Number(
-    (
-      parseFloat(
-        costRes.ResultsByTime?.[0]?.Total?.UnblendedCost?.Amount || '0'
-      )
-    ).toFixed(2)
-  )
+  // Sort services by cost descending
+  byService.sort((a, b) => b.cost - a.cost)
 
+  // Sort recommendations by savings descending
+  // (future-proof if you later expose savings per recommendation)
   const response: SummaryResponse = {
     currentMonthCost,
     potentialSavings: Number(potentialSavings.toFixed(2)),
     recommendationCount: recommendations.length,
+    byService,
     topRecommendations: topRecommendations.slice(0, 5)
   }
+
+  console.log(response)
 
   /**
    * 3. RESPONSE LAYER
@@ -136,90 +170,3 @@ export const handler = async (): Promise<{
     body: JSON.stringify(response)
   }
 }
-
-// import {
-//   CostExplorerClient,
-//   GetCostAndUsageCommand
-// } from '@aws-sdk/client-cost-explorer'
-
-// import {
-//   CostOptimizationHubClient,
-//   ListRecommendationsCommand
-// } from '@aws-sdk/client-cost-optimization-hub'
-
-// type COHRecommendation = {
-//   estimatedMonthlySavings?: number
-//   estimatedSavingsPercentage?: number
-//   estimatedMonthlyCost?: number
-// }
-
-// const ce = new CostExplorerClient({})
-// const coh = new CostOptimizationHubClient({
-//   region: 'us-east-1'
-// })
-
-// function getStartOfMonth() {
-//   const now = new Date()
-//   return new Date(now.getFullYear(), now.getMonth(), 1)
-//     .toISOString()
-//     .split('T')[0]
-// }
-
-// export const handler = async () => {
-//   const start = getStartOfMonth()
-//   const end = new Date().toISOString().split('T')[0]
-
-//   // 1. Get current month cost
-//   const costRes = await ce.send(
-//     new GetCostAndUsageCommand({
-//       TimePeriod: { Start: start, End: end },
-//       Granularity: 'MONTHLY',
-//       Metrics: ['UnblendedCost']
-//     })
-//   )
-
-//   const currentMonthCost =
-//     parseFloat(
-//       costRes.ResultsByTime?.[0]?.Total?.UnblendedCost?.Amount || '0'
-//     )
-
-//   // 2. Get recommendations (Cost Optimization Hub)
-//   let potentialSavings = 0
-//   let recommendationCount = 0
-
-//   try {
-//     const recRes = await coh.send(
-//       new ListRecommendationsCommand({
-//         maxResults: 100
-//       })
-//     )
-//     console.log(JSON.stringify(recRes, null, 2))
-
-//     const recommendations = (recRes.items ?? []) as COHRecommendation[]
-
-//     recommendationCount = recommendations.length
-
-//     for (const r of recommendations) {
-//       potentialSavings += r.estimatedMonthlySavings ?? 0
-//     }
-
-//     // for (const r of recommendations) {
-//     //   const savings = r.savingsOpportunity?.estimatedMonthlySavings?.amount
-//     //   if (savings) {
-//     //     potentialSavings += parseFloat(savings)
-//     //   }
-//     // }
-//   } catch (err) {
-//     // If COH isn't ready, don't fail the whole function
-//     console.log('COH not available yet', err)
-//   }
-
-//   return {
-//     statusCode: 200,
-//     body: JSON.stringify({
-//       currentMonthCost: Number(currentMonthCost.toFixed(2)),
-//       potentialSavings: Number(potentialSavings.toFixed(2)),
-//       recommendationCount
-//     })
-//   }
-// }
