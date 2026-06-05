@@ -10,6 +10,8 @@ import {
   ListRecommendationsCommand
 } from '@aws-sdk/client-cost-optimization-hub'
 
+import type { APIGatewayProxyEvent } from 'aws-lambda'
+
 /**
  * -----------------------
  * Types (your API layer)
@@ -28,6 +30,7 @@ type SummaryResponse = {
   recommendationCount: number
   byService: ServiceCost[]
   topRecommendations: TopRecommendation[]
+  drilldown: DrilldownItem[]
 }
 
 type AWSRecommendation = {
@@ -40,6 +43,11 @@ type AWSRecommendation = {
 
 type ServiceCost = {
   service: string
+  cost: number
+}
+
+type DrilldownItem = {
+  key: string
   cost: number
 }
 
@@ -82,15 +90,18 @@ function mapRecommendation(r: AWSRecommendation): TopRecommendation {
  * Handler
  * -----------------------
  */
-export const handler = async (): Promise<{
+export const handler = async (event: APIGatewayProxyEvent): Promise<{
   statusCode: number
   body: string
 }> => {
+  console.log({event})
   /**
    * 1. FETCH LAYER
    */
   const start = getStartOfMonth()
   const end = new Date().toISOString().split('T')[0]
+  const service = event.queryStringParameters?.service
+  console.log({service: service})
 
   const costRes = await ce.send(
     new GetCostAndUsageCommand({
@@ -150,6 +161,53 @@ export const handler = async (): Promise<{
   // Sort services by cost descending
   byService.sort((a, b) => b.cost - a.cost)
 
+  let drilldown: DrilldownItem[] = []
+
+  if (service) {
+    let groupByKey = 'USAGE_TYPE'
+
+    switch (service) {
+    case 'Amazon Elastic Compute Cloud - Compute':
+      groupByKey = 'INSTANCE_TYPE'
+      break
+
+    case 'Amazon Simple Storage Service':
+      groupByKey = 'USAGE_TYPE'
+      break
+
+    case 'AWS Lambda':
+      groupByKey = 'FUNCTION_NAME'
+      break
+
+    default:
+      groupByKey = 'USAGE_TYPE'
+    }
+
+    const drillRes = await ce.send(
+      new GetCostAndUsageCommand({
+        TimePeriod: {
+          Start: start,
+          End: end
+        },
+        Granularity: 'MONTHLY',
+        Metrics: ['UnblendedCost'],
+        GroupBy: [
+          {
+            Type: 'DIMENSION',
+            Key: groupByKey
+          }
+        ]
+      })
+    )
+
+    drilldown =
+      drillRes.ResultsByTime?.[0]?.Groups?.map((g) => ({
+        //key: g.Keys?.[0] ?? 'Unknown',
+        key: g.Keys?.join(' | ') ?? 'Unknown',
+        cost: Number(parseFloat(g.Metrics?.UnblendedCost?.Amount ?? '0').toFixed(2))
+      })) ?? []
+  }
+
   // Sort recommendations by savings descending
   // (future-proof if you later expose savings per recommendation)
   const response: SummaryResponse = {
@@ -157,10 +215,11 @@ export const handler = async (): Promise<{
     potentialSavings: Number(potentialSavings.toFixed(2)),
     recommendationCount: recommendations.length,
     byService,
-    topRecommendations: topRecommendations.slice(0, 5)
+    topRecommendations: topRecommendations.slice(0, 5),
+    drilldown: drilldown ?? []
   }
 
-  console.log(response)
+  console.log({response})
 
   /**
    * 3. RESPONSE LAYER

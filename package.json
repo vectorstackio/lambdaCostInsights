@@ -20,6 +20,7 @@
     "dotenv": "^17.4.2"
   },
   "devDependencies": {
+    "@types/aws-lambda": "^8.10.161",
     "@typescript-eslint/eslint-plugin": "^8.60.1",
     "@typescript-eslint/parser": "^8.60.1",
     "esbuild": "^0.25.12",
