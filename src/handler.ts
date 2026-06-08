@@ -2,7 +2,9 @@
 
 import {
   CostExplorerClient,
-  GetCostAndUsageCommand
+  GetCostAndUsageCommand,
+  type Dimension,
+  type Expression
 } from '@aws-sdk/client-cost-explorer'
 
 import {
@@ -14,9 +16,31 @@ import type { APIGatewayProxyEvent } from 'aws-lambda'
 
 /**
  * -----------------------
- * Types (your API layer)
+ * Types
  * -----------------------
  */
+
+type CostFilter = {
+  key: string
+  value: string
+}
+
+type DrilldownItem = {
+  key: string
+  cost: number
+}
+
+type DrilldownRequest = {
+  filters?: CostFilter[]
+  groupBy: Dimension
+}
+
+type DrilldownResponse = {
+  groupBy: Dimension
+  filters: CostFilter[]
+  items: DrilldownItem[]
+}
+
 type TopRecommendation = {
   resourceType: string
   action: string
@@ -26,11 +50,10 @@ type TopRecommendation = {
 
 type SummaryResponse = {
   currentMonthCost: number
+  byService: { service: string; cost: number }[]
   potentialSavings: number
   recommendationCount: number
-  byService: ServiceCost[]
   topRecommendations: TopRecommendation[]
-  drilldown: DrilldownItem[]
 }
 
 type AWSRecommendation = {
@@ -41,21 +64,12 @@ type AWSRecommendation = {
   recommendedResourceSummary?: string
 }
 
-type ServiceCost = {
-  service: string
-  cost: number
-}
-
-type DrilldownItem = {
-  key: string
-  cost: number
-}
-
 /**
  * -----------------------
- * AWS clients (data layer)
+ * AWS Clients
  * -----------------------
  */
+
 const ce = new CostExplorerClient({
   region: 'us-east-1'
 })
@@ -69,6 +83,7 @@ const coh = new CostOptimizationHubClient({
  * Helpers
  * -----------------------
  */
+
 function getStartOfMonth(): string {
   const now = new Date()
   return new Date(now.getFullYear(), now.getMonth(), 1)
@@ -76,39 +91,39 @@ function getStartOfMonth(): string {
     .split('T')[0]
 }
 
-function mapRecommendation(r: AWSRecommendation): TopRecommendation {
+function buildFilter(filters: CostFilter[]): Expression | undefined {
+  if (!filters.length) return undefined
+
+  const expressions: Expression[] = filters.map((f) => ({
+    Dimensions: {
+      Key: f.key as Dimension,
+      Values: [f.value]
+    }
+  }))
+
+  // IMPORTANT: Cost Explorer rule
+  if (expressions.length === 1) {
+    return expressions[0]
+  }
+
   return {
-    resourceType: r.currentResourceType ?? 'Unknown',
-    action: r.actionType ?? 'Unknown',
-    current: r.currentResourceSummary ?? 'N/A',
-    recommended: r.recommendedResourceSummary ?? 'N/A'
+    And: expressions
   }
 }
 
 /**
  * -----------------------
- * Handler
+ * HANDLER 1: SUMMARY
  * -----------------------
  */
-export const handler = async (event: APIGatewayProxyEvent): Promise<{
-  statusCode: number
-  body: string
-}> => {
-  console.log({event})
-  /**
-   * 1. FETCH LAYER
-   */
+
+async function handleSummary(): Promise<SummaryResponse> {
   const start = getStartOfMonth()
   const end = new Date().toISOString().split('T')[0]
-  const service = event.queryStringParameters?.service
-  console.log({service: service})
 
   const costRes = await ce.send(
     new GetCostAndUsageCommand({
-      TimePeriod: {
-        Start: start,
-        End: end
-      },
+      TimePeriod: { Start: start, End: end },
       Granularity: 'MONTHLY',
       Metrics: ['UnblendedCost'],
       GroupBy: [
@@ -126,106 +141,154 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<{
     })
   )
 
-  // const recommendations = (recRes.items ?? []) as any[]
-  const recommendations: AWSRecommendation[] = recRes.items ?? []
-
-  /**
-   * 2. TRANSFORM LAYER
-   */
-  // Service breakdown
-  const byService: ServiceCost[] =
-    costRes.ResultsByTime?.[0]?.Groups?.map((group) => ({
-      service: group.Keys?.[0] ?? 'Unknown',
+  const byService =
+    costRes.ResultsByTime?.[0]?.Groups?.map((g) => ({
+      service: g.Keys?.[0] ?? 'Unknown',
       cost: Number(
         parseFloat(
-          group.Metrics?.UnblendedCost?.Amount ?? '0'
+          g.Metrics?.UnblendedCost?.Amount ?? '0'
         ).toFixed(2)
       )
     })) ?? []
 
-  // Total monthly cost
-  const currentMonthCost = Number(
-    byService
-      .reduce((sum, service) => sum + service.cost, 0)
-      .toFixed(2)
+  const currentMonthCost = byService.reduce(
+    (sum, s) => sum + s.cost,
+    0
   )
 
-  // Savings + recommendations
   let potentialSavings = 0
 
-  const topRecommendations: TopRecommendation[] = recommendations.map((r) => {
+  const recommendations = (recRes.items ?? []) as AWSRecommendation[]
+  const topRecommendations = recommendations.map((r) => {
     potentialSavings += r.estimatedMonthlySavings ?? 0
-    return mapRecommendation(r)
+
+    return {
+      resourceType: r.currentResourceType ?? 'Unknown',
+      action: r.actionType ?? 'Unknown',
+      current: r.currentResourceSummary ?? 'N/A',
+      recommended: r.recommendedResourceSummary ?? 'N/A'
+    }
   })
 
-  // Sort services by cost descending
   byService.sort((a, b) => b.cost - a.cost)
 
-  let drilldown: DrilldownItem[] = []
+  return {
+    currentMonthCost: Number(currentMonthCost.toFixed(2)),
+    potentialSavings: Number(potentialSavings.toFixed(2)),
+    recommendationCount: recRes.items?.length ?? 0,
+    byService,
+    topRecommendations: topRecommendations.slice(0, 5)
+  }
+}
 
-  if (service) {
-    let groupByKey = 'USAGE_TYPE'
+/**
+ * -----------------------
+ * HANDLER 2: DRILLDOWN ENGINE
+ * -----------------------
+ */
 
-    switch (service) {
-    case 'Amazon Elastic Compute Cloud - Compute':
-      groupByKey = 'INSTANCE_TYPE'
-      break
+async function handleDrilldown(
+  body: DrilldownRequest
+): Promise<DrilldownResponse> {
+  const filters = body.filters ?? []
+  const groupBy = body.groupBy
 
-    case 'Amazon Simple Storage Service':
-      groupByKey = 'USAGE_TYPE'
-      break
+  if (!groupBy) {
+    throw new Error('groupBy is required')
+  }
 
-    case 'AWS Lambda':
-      groupByKey = 'FUNCTION_NAME'
-      break
+  const start = getStartOfMonth()
+  const end = new Date().toISOString().split('T')[0]
 
-    default:
-      groupByKey = 'USAGE_TYPE'
+  const res = await ce.send(
+    new GetCostAndUsageCommand({
+      TimePeriod: { Start: start, End: end },
+      Granularity: 'MONTHLY',
+      Metrics: ['UnblendedCost'],
+      GroupBy: [
+        {
+          Type: 'DIMENSION',
+          Key: groupBy
+        }
+      ],
+      Filter: buildFilter(filters)
+    })
+  )
+
+  const items: DrilldownItem[] =
+    res.ResultsByTime?.[0]?.Groups?.map((g) => ({
+      key: g.Keys?.[0] ?? 'Unknown',
+      cost: Number(
+        parseFloat(
+          g.Metrics?.UnblendedCost?.Amount ?? '0'
+        ).toFixed(2)
+      )
+    })) ?? []
+
+  return {
+    groupBy,
+    filters,
+    items
+  }
+}
+
+/**
+ * -----------------------
+ * MAIN LAMBDA ENTRY
+ * -----------------------
+ */
+
+export const handler = async (
+  event: APIGatewayProxyEvent
+): Promise<{ statusCode: number; body: string }> => {
+  try {
+    console.log({ event })
+    // const method = event.httpMethod
+    const method = event.requestContext?.http?.method
+    console.log({ method })
+    //const method = event.requestContext.http.method
+
+    /**
+     * -----------------------
+     * ROUTER
+     * -----------------------
+     */
+    if (method === 'GET') {
+      const summary = await handleSummary()
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify(summary)
+      }
     }
 
-    const drillRes = await ce.send(
-      new GetCostAndUsageCommand({
-        TimePeriod: {
-          Start: start,
-          End: end
-        },
-        Granularity: 'MONTHLY',
-        Metrics: ['UnblendedCost'],
-        GroupBy: [
-          {
-            Type: 'DIMENSION',
-            Key: groupByKey
-          }
-        ]
+    if (method === 'POST') {
+      const body: DrilldownRequest = JSON.parse(
+        event.body ?? '{}'
+      )
+
+      const result = await handleDrilldown(body)
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify(result)
+      }
+    }
+
+    return {
+      statusCode: 405,
+      body: JSON.stringify({
+        error: 'Method not allowed'
       })
-    )
+    }
+  } catch (err) {
+    console.error(err)
 
-    drilldown =
-      drillRes.ResultsByTime?.[0]?.Groups?.map((g) => ({
-        //key: g.Keys?.[0] ?? 'Unknown',
-        key: g.Keys?.join(' | ') ?? 'Unknown',
-        cost: Number(parseFloat(g.Metrics?.UnblendedCost?.Amount ?? '0').toFixed(2))
-      })) ?? []
-  }
-
-  // Sort recommendations by savings descending
-  // (future-proof if you later expose savings per recommendation)
-  const response: SummaryResponse = {
-    currentMonthCost,
-    potentialSavings: Number(potentialSavings.toFixed(2)),
-    recommendationCount: recommendations.length,
-    byService,
-    topRecommendations: topRecommendations.slice(0, 5),
-    drilldown: drilldown ?? []
-  }
-
-  console.log({response})
-
-  /**
-   * 3. RESPONSE LAYER
-   */
-  return {
-    statusCode: 200,
-    body: JSON.stringify(response)
+    return {
+      statusCode: 500,
+      body: JSON.stringify({
+        error: 'Internal server error'
+      })
+    }
   }
 }
