@@ -14,6 +14,10 @@ import {
 
 import type { APIGatewayProxyEventV2 } from 'aws-lambda'
 
+import type {
+  ResultByTime
+} from '@aws-sdk/client-cost-explorer'
+
 /**
  * -----------------------
  * Types
@@ -62,23 +66,6 @@ type TrendPoint = {
   cost: number
 }
 
-type SummaryResponse = {
-  currentMonthCost: number
-  previousMonthCost: number
-  monthOverMonthChangePercent: number
-  byService: { service: string; cost: number }[]  // 👈 revert this
-  byServiceComparison: ServiceComparison[]        // 👈 keep enhanced version separately
-  trend: TrendPoint[]
-  potentialSavings: number
-  recommendationCount: number
-  topRecommendations: TopRecommendation[]
-  topCostIncreaseDrivers: CostIncreaseDriver[]
-  metadata?: {
-    generatedAt: string
-    currency: string
-  }
-}
-
 type AWSRecommendation = {
   estimatedMonthlySavings?: number
   currentResourceType?: string
@@ -93,6 +80,34 @@ type CostIncreaseDriver = {
   previousCost: number
   increase: number
   contributionPercent: number
+}
+
+type ServiceAnomaly = {
+  service: string
+  currentCost: number
+  averageCost: number
+  spikeAmount: number
+  spikePercent: number
+  zScore: number
+  severity: 'low' | 'medium' | 'high'
+}
+
+type SummaryResponse = {
+  currentMonthCost: number
+  previousMonthCost: number
+  monthOverMonthChangePercent: number
+  byService: { service: string; cost: number }[]  // 👈 revert this
+  byServiceComparison: ServiceComparison[]        // 👈 keep enhanced version separately
+  trend: TrendPoint[]
+  potentialSavings: number
+  recommendationCount: number
+  topRecommendations: TopRecommendation[]
+  topCostIncreaseDrivers: CostIncreaseDriver[]
+  anomalies: ServiceAnomaly[]
+  metadata?: {
+    generatedAt: string
+    currency: string
+  }
 }
 
 /**
@@ -333,23 +348,149 @@ async function getTrend(): Promise<TrendPoint[]> {
   return results
 }
 
+async function getServiceHistory(months = 6) {
+  const now = new Date()
+
+  const start = new Date(
+    now.getFullYear(),
+    now.getMonth() - (months - 1),
+    1
+  )
+
+  const end = new Date(
+    now.getFullYear(),
+    now.getMonth() + 1,
+    1
+  )
+
+  const res = await ce.send(
+    new GetCostAndUsageCommand({
+      TimePeriod: {
+        Start: toYMD(start),
+        End: toYMD(end)
+      },
+      Granularity: 'MONTHLY',
+      Metrics: ['UnblendedCost'],
+      GroupBy: [
+        {
+          Type: 'DIMENSION',
+          Key: 'SERVICE'
+        }
+      ]
+    })
+  )
+
+  return res.ResultsByTime ?? []
+}
+
+function average(values: number[]) {
+  return (
+    values.reduce((a, b) => a + b, 0) /
+    values.length
+  )
+}
+
+function stdDev(values: number[]) {
+  const avg = average(values)
+
+  const variance =
+    values.reduce(
+      (sum, v) => sum + Math.pow(v - avg, 2),
+      0
+    ) / values.length
+
+  return Math.sqrt(variance)
+}
+
+function buildServiceHistoryMap(
+  resultsByTime: ResultByTime[]
+): Record<string, number[]> {
+  const history: Record<string, number[]> = {}
+
+  for (const month of resultsByTime) {
+    for (const group of month.Groups ?? []) {
+      const service = group.Keys?.[0] ?? 'Unknown'
+
+      const cost = Number(
+        group.Metrics?.UnblendedCost?.Amount ?? '0'
+      )
+
+      if (!history[service]) {
+        history[service] = []
+      }
+
+      history[service].push(cost)
+    }
+  }
+
+  return history
+}
+
+function buildAnomalies(
+  serviceHistory: Record<string, number[]>
+): ServiceAnomaly[] {
+  const anomalies: ServiceAnomaly[] = []
+
+  for (const [service, history] of Object.entries(
+    serviceHistory
+  )) {
+    if (history.length < 4) continue
+
+    const current = history[history.length - 1]
+
+    const baseline = history.slice(0, -1)
+
+    const avg = average(baseline)
+    const sd = stdDev(baseline)
+
+    if (sd === 0) continue
+
+    const zScore = (current - avg) / sd
+
+    if (zScore < 2) continue
+
+    const spikeAmount = current - avg
+
+    anomalies.push({
+      service,
+      currentCost: Number(current.toFixed(2)),
+      averageCost: Number(avg.toFixed(2)),
+      spikeAmount: Number(spikeAmount.toFixed(2)),
+      spikePercent: Number(
+        (((current - avg) / avg) * 100).toFixed(2)
+      ),
+      zScore: Number(zScore.toFixed(2)),
+      severity:
+        zScore > 4
+          ? 'high'
+          : zScore > 3
+            ? 'medium'
+            : 'low'
+    })
+  }
+
+  return anomalies.sort(
+    (a, b) => b.zScore - a.zScore
+  )
+}
+
 /**
  * -----------------------
  * SUMMARY HANDLER
  * -----------------------
  */
-
 async function handleSummary(): Promise<SummaryResponse> {
   const current = getStartOfMonth()
   const end = toYMD(new Date())
 
   const prev = getPreviousMonthRange()
 
-  const [currentData, previousData, recRes, trend] = await Promise.all([
+  const [currentData, previousData, recRes, trend, serviceHistory] = await Promise.all([
     getCostData(current, end),
     getCostData(prev.start, prev.end),
     coh.send(new ListRecommendationsCommand({ maxResults: 100 })),
-    getTrend()
+    getTrend(),
+    getServiceHistory()
   ])
 
   const monthOverMonthChangePercent = calculateMoMChange(
@@ -383,6 +524,10 @@ async function handleSummary(): Promise<SummaryResponse> {
     }
   })
 
+  const serviceHistoryMap = buildServiceHistoryMap(serviceHistory)
+
+  const anomalies = buildAnomalies(serviceHistoryMap)
+
   return {
     currentMonthCost: currentData.total,
     previousMonthCost: previousData.total,
@@ -399,6 +544,8 @@ async function handleSummary(): Promise<SummaryResponse> {
     monthOverMonthChangePercent,
 
     trend,
+
+    anomalies,
 
     potentialSavings: Number(
       potentialSavings.toFixed(2)
