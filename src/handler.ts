@@ -49,13 +49,33 @@ type TopRecommendation = {
   recommended: string
 }
 
+type ServiceComparison = {
+  service: string
+  currentCost: number
+  previousCost: number
+  change: number
+  changePercent: number
+}
+
+type TrendPoint = {
+  month: string
+  cost: number
+}
+
 type SummaryResponse = {
   currentMonthCost: number
   previousMonthCost: number
-  byService: { service: string; cost: number }[]
+  monthOverMonthChangePercent: number
+  byService: { service: string; cost: number }[]  // 👈 revert this
+  byServiceComparison: ServiceComparison[]        // 👈 keep enhanced version separately
+  trend: TrendPoint[]
   potentialSavings: number
   recommendationCount: number
   topRecommendations: TopRecommendation[]
+  metadata?: {
+    generatedAt: string
+    currency: string
+  }
 }
 
 type AWSRecommendation = {
@@ -121,12 +141,6 @@ function getPreviousMonthRange() {
   }
 }
 
-/**
- * -----------------------
- * Helpers
- * -----------------------
- */
-
 function buildFilter(filters: CostFilter[]): Expression | undefined {
   if (!filters.length) return undefined
 
@@ -137,12 +151,22 @@ function buildFilter(filters: CostFilter[]): Expression | undefined {
     }
   }))
 
-  if (expressions.length === 1) return expressions[0]
+  if (expressions.length === 1) {
+    return expressions[0]
+  }
 
-  return { And: expressions }
+  return {
+    And: expressions
+  }
 }
 
-async function getMonthlyCost(start: string, end: string) {
+/**
+ * -----------------------
+ * Core cost function (reused everywhere)
+ * -----------------------
+ */
+
+async function getCostData(start: string, end: string) {
   const res = await ce.send(
     new GetCostAndUsageCommand({
       TimePeriod: { Start: start, End: end },
@@ -162,8 +186,95 @@ async function getMonthlyCost(start: string, end: string) {
 
   return {
     total: Number(total.toFixed(2)),
-    byService: byService.sort((a, b) => b.cost - a.cost)
+    byService
   }
+}
+
+/**
+ * -----------------------
+ * MoM + comparison helpers
+ * -----------------------
+ */
+
+function calculateMoMChange(current: number, previous: number) {
+  if (previous === 0) return 0
+  return Number((((current - previous) / previous) * 100).toFixed(2))
+}
+
+function buildServiceComparison(
+  current: { service: string; cost: number }[],
+  previous: { service: string; cost: number }[]
+): ServiceComparison[] {
+  const prevMap = new Map(previous.map(s => [s.service, s.cost]))
+
+  const allServices = new Set([
+    ...current.map(s => s.service),
+    ...previous.map(s => s.service)
+  ])
+
+  return Array.from(allServices).map(service => {
+    const currentCost = current.find(s => s.service === service)?.cost ?? 0
+    const previousCost = prevMap.get(service) ?? 0
+
+    const change = Number((currentCost - previousCost).toFixed(2))
+    const changePercent =
+      previousCost === 0 ? 0 : Number(((change / previousCost) * 100).toFixed(2))
+
+    return {
+      service,
+      currentCost,
+      previousCost,
+      change,
+      changePercent
+    }
+  }).sort((a, b) => b.currentCost - a.currentCost)
+}
+
+/**
+ * -----------------------
+ * 6-month trend
+ * -----------------------
+ */
+
+function getLast6Months() {
+  const now = new Date()
+
+  return Array.from({ length: 6 }).map((_, i) => {
+    const start = new Date(now.getFullYear(), now.getMonth() - (5 - i), 1)
+    const end = new Date(now.getFullYear(), now.getMonth() - (5 - i) + 1, 0)
+
+    return {
+      start: toYMD(start),
+      end: toYMD(end),
+      month: start.toISOString().slice(0, 7)
+    }
+  })
+}
+
+async function getTrend(): Promise<TrendPoint[]> {
+  const months = getLast6Months()
+
+  const results = await Promise.all(
+    months.map(async (m) => {
+      const res = await ce.send(
+        new GetCostAndUsageCommand({
+          TimePeriod: { Start: m.start, End: m.end },
+          Granularity: 'MONTHLY',
+          Metrics: ['UnblendedCost']
+        })
+      )
+
+      const cost =
+        res.ResultsByTime?.[0]?.Total?.UnblendedCost?.Amount ?? '0'
+
+      return {
+        month: m.month,
+        cost: Number(parseFloat(cost).toFixed(2))
+      }
+    })
+  )
+
+  return results
 }
 
 /**
@@ -173,22 +284,33 @@ async function getMonthlyCost(start: string, end: string) {
  */
 
 async function handleSummary(): Promise<SummaryResponse> {
-  const currentStart = getStartOfMonth()
-  const currentEnd = toYMD(new Date())
+  const current = getStartOfMonth()
+  const end = toYMD(new Date())
 
-  const previous = getPreviousMonthRange()
+  const prev = getPreviousMonthRange()
 
-  const [current, previousMonth, recRes] = await Promise.all([
-    getMonthlyCost(currentStart, currentEnd),
-    getMonthlyCost(previous.start, previous.end),
-    coh.send(new ListRecommendationsCommand({ maxResults: 100 }))
+  const [currentData, previousData, recRes, trend] = await Promise.all([
+    getCostData(current, end),
+    getCostData(prev.start, prev.end),
+    coh.send(new ListRecommendationsCommand({ maxResults: 100 })),
+    getTrend()
   ])
+
+  const monthOverMonthChangePercent = calculateMoMChange(
+    currentData.total,
+    previousData.total
+  )
+
+  const byService = buildServiceComparison(
+    currentData.byService,
+    previousData.byService
+  )
 
   let potentialSavings = 0
 
   const topRecommendations: TopRecommendation[] = (
     (recRes.items ?? []) as AWSRecommendation[]
-  ).map((r) => {
+  ).map(r => {
     potentialSavings += r.estimatedMonthlySavings ?? 0
 
     return {
@@ -200,18 +322,43 @@ async function handleSummary(): Promise<SummaryResponse> {
   })
 
   return {
-    currentMonthCost: current.total,
-    previousMonthCost: previousMonth.total,
+    // =========================
+    // ORIGINAL FRONTEND CONTRACT (UNCHANGED)
+    // =========================
+
+    currentMonthCost: currentData.total,
+
+    previousMonthCost: previousData.total,
+
+    byService: currentData.byService.map(s => ({
+      service: s.service,
+      cost: s.cost
+    })),
+
     potentialSavings: Number(potentialSavings.toFixed(2)),
     recommendationCount: recRes.items?.length ?? 0,
-    byService: current.byService,
-    topRecommendations: topRecommendations
+    topRecommendations: topRecommendations,
+
+    // =========================
+    // NEW FIELDS (SAFE ADDITIONS)
+    // =========================
+
+    monthOverMonthChangePercent,
+
+    byServiceComparison: byService, // enhanced version (new shape)
+
+    trend,
+
+    metadata: {
+      generatedAt: new Date().toISOString(),
+      currency: 'USD'
+    }
   }
 }
 
 /**
  * -----------------------
- * DRILLDOWN HANDLER
+ * DRILLDOWN HANDLER (unchanged logic)
  * -----------------------
  */
 
@@ -232,13 +379,13 @@ async function handleDrilldown(body: DrilldownRequest): Promise<DrilldownRespons
     })
   )
 
-  const items: DrilldownItem[] =
+  const items =
     res.ResultsByTime?.[0]?.Groups
-      ?.map((g) => ({
+      ?.map(g => ({
         key: g.Keys?.[0] ?? 'Unknown',
         cost: Number(parseFloat(g.Metrics?.UnblendedCost?.Amount ?? '0').toFixed(2))
       }))
-      .filter((i) => i.cost > 0)
+      .filter(i => i.cost > 0)
       .sort((a, b) => b.cost - a.cost) ?? []
 
   return {
@@ -294,6 +441,7 @@ export const handler = async (
     }
   } catch (err) {
     console.error(err)
+    console.error('DRILLDOWN ERROR RAW:', err)
 
     return {
       statusCode: 500,
@@ -353,6 +501,7 @@ export const handler = async (
 
 // type SummaryResponse = {
 //   currentMonthCost: number
+//   previousMonthCost: number
 //   byService: { service: string; cost: number }[]
 //   potentialSavings: number
 //   recommendationCount: number
@@ -378,7 +527,7 @@ export const handler = async (
 
 // /**
 //  * -----------------------
-//  * Drilldown hierarchy (AWS-like)
+//  * Drilldown hierarchy
 //  * -----------------------
 //  */
 
@@ -397,16 +546,36 @@ export const handler = async (
 
 // /**
 //  * -----------------------
-//  * Helpers
+//  * Date helpers
 //  * -----------------------
 //  */
 
+// function toYMD(date: Date): string {
+//   return date.toISOString().split('T')[0]
+// }
+
 // function getStartOfMonth(): string {
 //   const now = new Date()
-//   return new Date(now.getFullYear(), now.getMonth(), 1)
-//     .toISOString()
-//     .split('T')[0]
+//   return toYMD(new Date(now.getFullYear(), now.getMonth(), 1))
 // }
+
+// function getPreviousMonthRange() {
+//   const now = new Date()
+
+//   const start = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+//   const end = new Date(now.getFullYear(), now.getMonth(), 0)
+
+//   return {
+//     start: toYMD(start),
+//     end: toYMD(end)
+//   }
+// }
+
+// /**
+//  * -----------------------
+//  * Helpers
+//  * -----------------------
+//  */
 
 // function buildFilter(filters: CostFilter[]): Expression | undefined {
 //   if (!filters.length) return undefined
@@ -423,17 +592,8 @@ export const handler = async (
 //   return { And: expressions }
 // }
 
-// /**
-//  * -----------------------
-//  * SUMMARY HANDLER
-//  * -----------------------
-//  */
-
-// async function handleSummary(): Promise<SummaryResponse> {
-//   const start = getStartOfMonth()
-//   const end = new Date().toISOString().split('T')[0]
-
-//   const costRes = await ce.send(
+// async function getMonthlyCost(start: string, end: string) {
+//   const res = await ce.send(
 //     new GetCostAndUsageCommand({
 //       TimePeriod: { Start: start, End: end },
 //       Granularity: 'MONTHLY',
@@ -442,22 +602,37 @@ export const handler = async (
 //     })
 //   )
 
-//   const recRes = await coh.send(
-//     new ListRecommendationsCommand({ maxResults: 100 })
-//   )
-
 //   const byService =
-//     costRes.ResultsByTime?.[0]?.Groups?.map((g) => ({
+//     res.ResultsByTime?.[0]?.Groups?.map((g) => ({
 //       service: g.Keys?.[0] ?? 'Unknown',
-//       cost: Number(
-//         parseFloat(g.Metrics?.UnblendedCost?.Amount ?? '0').toFixed(2)
-//       )
+//       cost: Number(parseFloat(g.Metrics?.UnblendedCost?.Amount ?? '0').toFixed(2))
 //     })) ?? []
 
-//   const currentMonthCost = byService.reduce(
-//     (sum, s) => sum + s.cost,
-//     0
-//   )
+//   const total = byService.reduce((sum, s) => sum + s.cost, 0)
+
+//   return {
+//     total: Number(total.toFixed(2)),
+//     byService: byService.sort((a, b) => b.cost - a.cost)
+//   }
+// }
+
+// /**
+//  * -----------------------
+//  * SUMMARY HANDLER
+//  * -----------------------
+//  */
+
+// async function handleSummary(): Promise<SummaryResponse> {
+//   const currentStart = getStartOfMonth()
+//   const currentEnd = toYMD(new Date())
+
+//   const previous = getPreviousMonthRange()
+
+//   const [current, previousMonth, recRes] = await Promise.all([
+//     getMonthlyCost(currentStart, currentEnd),
+//     getMonthlyCost(previous.start, previous.end),
+//     coh.send(new ListRecommendationsCommand({ maxResults: 100 }))
+//   ])
 
 //   let potentialSavings = 0
 
@@ -475,11 +650,12 @@ export const handler = async (
 //   })
 
 //   return {
-//     currentMonthCost: Number(currentMonthCost.toFixed(2)),
+//     currentMonthCost: current.total,
+//     previousMonthCost: previousMonth.total,
 //     potentialSavings: Number(potentialSavings.toFixed(2)),
 //     recommendationCount: recRes.items?.length ?? 0,
-//     byService: byService.sort((a, b) => b.cost - a.cost),
-//     topRecommendations: topRecommendations.slice(0, 5)
+//     byService: current.byService,
+//     topRecommendations: topRecommendations
 //   }
 // }
 
@@ -489,14 +665,12 @@ export const handler = async (
 //  * -----------------------
 //  */
 
-// async function handleDrilldown(
-//   body: DrilldownRequest
-// ): Promise<DrilldownResponse> {
+// async function handleDrilldown(body: DrilldownRequest): Promise<DrilldownResponse> {
 //   const filters = body.filters ?? []
 //   const groupBy = body.groupBy
 
 //   const start = getStartOfMonth()
-//   const end = new Date().toISOString().split('T')[0]
+//   const end = toYMD(new Date())
 
 //   const res = await ce.send(
 //     new GetCostAndUsageCommand({
@@ -512,9 +686,7 @@ export const handler = async (
 //     res.ResultsByTime?.[0]?.Groups
 //       ?.map((g) => ({
 //         key: g.Keys?.[0] ?? 'Unknown',
-//         cost: Number(
-//           parseFloat(g.Metrics?.UnblendedCost?.Amount ?? '0').toFixed(2)
-//         )
+//         cost: Number(parseFloat(g.Metrics?.UnblendedCost?.Amount ?? '0').toFixed(2))
 //       }))
 //       .filter((i) => i.cost > 0)
 //       .sort((a, b) => b.cost - a.cost) ?? []
