@@ -80,6 +80,7 @@ type CostIncreaseDriver = {
   previousCost: number
   increase: number
   contributionPercent: number
+  isNewService: boolean
 }
 
 type ServiceAnomaly = {
@@ -200,11 +201,14 @@ function buildTopCostIncreaseDrivers(
 
       const increase = service.cost - previousCost
 
+      const isNewService = !previousMap.has(service.service)
+
       return {
         service: service.service,
         currentCost: service.cost,
         previousCost,
-        increase
+        increase,
+        isNewService
       }
     })
     .filter(item => item.increase > 0)
