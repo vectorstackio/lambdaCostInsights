@@ -51,6 +51,7 @@ type TopRecommendation = {
 
 type SummaryResponse = {
   currentMonthCost: number
+  previousMonthCost: number
   byService: { service: string; cost: number }[]
   potentialSavings: number
   recommendationCount: number
@@ -76,7 +77,7 @@ const coh = new CostOptimizationHubClient({ region: 'us-east-1' })
 
 /**
  * -----------------------
- * Drilldown hierarchy (AWS-like)
+ * Drilldown hierarchy
  * -----------------------
  */
 
@@ -95,16 +96,36 @@ function getNextGroupBy(current: Dimension): Dimension | undefined {
 
 /**
  * -----------------------
- * Helpers
+ * Date helpers
  * -----------------------
  */
 
+function toYMD(date: Date): string {
+  return date.toISOString().split('T')[0]
+}
+
 function getStartOfMonth(): string {
   const now = new Date()
-  return new Date(now.getFullYear(), now.getMonth(), 1)
-    .toISOString()
-    .split('T')[0]
+  return toYMD(new Date(now.getFullYear(), now.getMonth(), 1))
 }
+
+function getPreviousMonthRange() {
+  const now = new Date()
+
+  const start = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+  const end = new Date(now.getFullYear(), now.getMonth(), 0)
+
+  return {
+    start: toYMD(start),
+    end: toYMD(end)
+  }
+}
+
+/**
+ * -----------------------
+ * Helpers
+ * -----------------------
+ */
 
 function buildFilter(filters: CostFilter[]): Expression | undefined {
   if (!filters.length) return undefined
@@ -121,17 +142,8 @@ function buildFilter(filters: CostFilter[]): Expression | undefined {
   return { And: expressions }
 }
 
-/**
- * -----------------------
- * SUMMARY HANDLER
- * -----------------------
- */
-
-async function handleSummary(): Promise<SummaryResponse> {
-  const start = getStartOfMonth()
-  const end = new Date().toISOString().split('T')[0]
-
-  const costRes = await ce.send(
+async function getMonthlyCost(start: string, end: string) {
+  const res = await ce.send(
     new GetCostAndUsageCommand({
       TimePeriod: { Start: start, End: end },
       Granularity: 'MONTHLY',
@@ -140,22 +152,37 @@ async function handleSummary(): Promise<SummaryResponse> {
     })
   )
 
-  const recRes = await coh.send(
-    new ListRecommendationsCommand({ maxResults: 100 })
-  )
-
   const byService =
-    costRes.ResultsByTime?.[0]?.Groups?.map((g) => ({
+    res.ResultsByTime?.[0]?.Groups?.map((g) => ({
       service: g.Keys?.[0] ?? 'Unknown',
-      cost: Number(
-        parseFloat(g.Metrics?.UnblendedCost?.Amount ?? '0').toFixed(2)
-      )
+      cost: Number(parseFloat(g.Metrics?.UnblendedCost?.Amount ?? '0').toFixed(2))
     })) ?? []
 
-  const currentMonthCost = byService.reduce(
-    (sum, s) => sum + s.cost,
-    0
-  )
+  const total = byService.reduce((sum, s) => sum + s.cost, 0)
+
+  return {
+    total: Number(total.toFixed(2)),
+    byService: byService.sort((a, b) => b.cost - a.cost)
+  }
+}
+
+/**
+ * -----------------------
+ * SUMMARY HANDLER
+ * -----------------------
+ */
+
+async function handleSummary(): Promise<SummaryResponse> {
+  const currentStart = getStartOfMonth()
+  const currentEnd = toYMD(new Date())
+
+  const previous = getPreviousMonthRange()
+
+  const [current, previousMonth, recRes] = await Promise.all([
+    getMonthlyCost(currentStart, currentEnd),
+    getMonthlyCost(previous.start, previous.end),
+    coh.send(new ListRecommendationsCommand({ maxResults: 100 }))
+  ])
 
   let potentialSavings = 0
 
@@ -173,11 +200,12 @@ async function handleSummary(): Promise<SummaryResponse> {
   })
 
   return {
-    currentMonthCost: Number(currentMonthCost.toFixed(2)),
+    currentMonthCost: current.total,
+    previousMonthCost: previousMonth.total,
     potentialSavings: Number(potentialSavings.toFixed(2)),
     recommendationCount: recRes.items?.length ?? 0,
-    byService: byService.sort((a, b) => b.cost - a.cost),
-    topRecommendations: topRecommendations.slice(0, 5)
+    byService: current.byService,
+    topRecommendations: topRecommendations
   }
 }
 
@@ -187,14 +215,12 @@ async function handleSummary(): Promise<SummaryResponse> {
  * -----------------------
  */
 
-async function handleDrilldown(
-  body: DrilldownRequest
-): Promise<DrilldownResponse> {
+async function handleDrilldown(body: DrilldownRequest): Promise<DrilldownResponse> {
   const filters = body.filters ?? []
   const groupBy = body.groupBy
 
   const start = getStartOfMonth()
-  const end = new Date().toISOString().split('T')[0]
+  const end = toYMD(new Date())
 
   const res = await ce.send(
     new GetCostAndUsageCommand({
@@ -210,9 +236,7 @@ async function handleDrilldown(
     res.ResultsByTime?.[0]?.Groups
       ?.map((g) => ({
         key: g.Keys?.[0] ?? 'Unknown',
-        cost: Number(
-          parseFloat(g.Metrics?.UnblendedCost?.Amount ?? '0').toFixed(2)
-        )
+        cost: Number(parseFloat(g.Metrics?.UnblendedCost?.Amount ?? '0').toFixed(2))
       }))
       .filter((i) => i.cost > 0)
       .sort((a, b) => b.cost - a.cost) ?? []
@@ -299,7 +323,7 @@ export const handler = async (
 //  */
 
 // type CostFilter = {
-//   key: string
+//   key: Dimension
 //   value: string
 // }
 
@@ -315,6 +339,7 @@ export const handler = async (
 
 // type DrilldownResponse = {
 //   groupBy: Dimension
+//   nextGroupBy?: Dimension
 //   filters: CostFilter[]
 //   items: DrilldownItem[]
 // }
@@ -348,13 +373,27 @@ export const handler = async (
 //  * -----------------------
 //  */
 
-// const ce = new CostExplorerClient({
-//   region: 'us-east-1'
-// })
+// const ce = new CostExplorerClient({ region: 'us-east-1' })
+// const coh = new CostOptimizationHubClient({ region: 'us-east-1' })
 
-// const coh = new CostOptimizationHubClient({
-//   region: 'us-east-1'
-// })
+// /**
+//  * -----------------------
+//  * Drilldown hierarchy (AWS-like)
+//  * -----------------------
+//  */
+
+// const DRILLDOWN_LEVELS: Dimension[] = [
+//   'SERVICE',
+//   'REGION',
+//   'USAGE_TYPE',
+//   'OPERATION',
+//   'LINKED_ACCOUNT'
+// ]
+
+// function getNextGroupBy(current: Dimension): Dimension | undefined {
+//   const idx = DRILLDOWN_LEVELS.indexOf(current)
+//   return DRILLDOWN_LEVELS[idx + 1]
+// }
 
 // /**
 //  * -----------------------
@@ -374,24 +413,19 @@ export const handler = async (
 
 //   const expressions: Expression[] = filters.map((f) => ({
 //     Dimensions: {
-//       Key: f.key as Dimension,
+//       Key: f.key,
 //       Values: [f.value]
 //     }
 //   }))
 
-//   // IMPORTANT: Cost Explorer rule
-//   if (expressions.length === 1) {
-//     return expressions[0]
-//   }
+//   if (expressions.length === 1) return expressions[0]
 
-//   return {
-//     And: expressions
-//   }
+//   return { And: expressions }
 // }
 
 // /**
 //  * -----------------------
-//  * HANDLER 1: SUMMARY
+//  * SUMMARY HANDLER
 //  * -----------------------
 //  */
 
@@ -404,28 +438,19 @@ export const handler = async (
 //       TimePeriod: { Start: start, End: end },
 //       Granularity: 'MONTHLY',
 //       Metrics: ['UnblendedCost'],
-//       GroupBy: [
-//         {
-//           Type: 'DIMENSION',
-//           Key: 'SERVICE'
-//         }
-//       ]
+//       GroupBy: [{ Type: 'DIMENSION', Key: 'SERVICE' }]
 //     })
 //   )
 
 //   const recRes = await coh.send(
-//     new ListRecommendationsCommand({
-//       maxResults: 100
-//     })
+//     new ListRecommendationsCommand({ maxResults: 100 })
 //   )
 
 //   const byService =
 //     costRes.ResultsByTime?.[0]?.Groups?.map((g) => ({
 //       service: g.Keys?.[0] ?? 'Unknown',
 //       cost: Number(
-//         parseFloat(
-//           g.Metrics?.UnblendedCost?.Amount ?? '0'
-//         ).toFixed(2)
+//         parseFloat(g.Metrics?.UnblendedCost?.Amount ?? '0').toFixed(2)
 //       )
 //     })) ?? []
 
@@ -436,8 +461,9 @@ export const handler = async (
 
 //   let potentialSavings = 0
 
-//   const recommendations = (recRes.items ?? []) as AWSRecommendation[]
-//   const topRecommendations = recommendations.map((r) => {
+//   const topRecommendations: TopRecommendation[] = (
+//     (recRes.items ?? []) as AWSRecommendation[]
+//   ).map((r) => {
 //     potentialSavings += r.estimatedMonthlySavings ?? 0
 
 //     return {
@@ -448,20 +474,18 @@ export const handler = async (
 //     }
 //   })
 
-//   byService.sort((a, b) => b.cost - a.cost)
-
 //   return {
 //     currentMonthCost: Number(currentMonthCost.toFixed(2)),
 //     potentialSavings: Number(potentialSavings.toFixed(2)),
 //     recommendationCount: recRes.items?.length ?? 0,
-//     byService,
+//     byService: byService.sort((a, b) => b.cost - a.cost),
 //     topRecommendations: topRecommendations.slice(0, 5)
 //   }
 // }
 
 // /**
 //  * -----------------------
-//  * HANDLER 2: DRILLDOWN ENGINE
+//  * DRILLDOWN HANDLER
 //  * -----------------------
 //  */
 
@@ -471,10 +495,6 @@ export const handler = async (
 //   const filters = body.filters ?? []
 //   const groupBy = body.groupBy
 
-//   if (!groupBy) {
-//     throw new Error('groupBy is required')
-//   }
-
 //   const start = getStartOfMonth()
 //   const end = new Date().toISOString().split('T')[0]
 
@@ -483,28 +503,25 @@ export const handler = async (
 //       TimePeriod: { Start: start, End: end },
 //       Granularity: 'MONTHLY',
 //       Metrics: ['UnblendedCost'],
-//       GroupBy: [
-//         {
-//           Type: 'DIMENSION',
-//           Key: groupBy
-//         }
-//       ],
+//       GroupBy: [{ Type: 'DIMENSION', Key: groupBy }],
 //       Filter: buildFilter(filters)
 //     })
 //   )
 
 //   const items: DrilldownItem[] =
-//     res.ResultsByTime?.[0]?.Groups?.map((g) => ({
-//       key: g.Keys?.[0] ?? 'Unknown',
-//       cost: Number(
-//         parseFloat(
-//           g.Metrics?.UnblendedCost?.Amount ?? '0'
-//         ).toFixed(2)
-//       )
-//     })) ?? []
+//     res.ResultsByTime?.[0]?.Groups
+//       ?.map((g) => ({
+//         key: g.Keys?.[0] ?? 'Unknown',
+//         cost: Number(
+//           parseFloat(g.Metrics?.UnblendedCost?.Amount ?? '0').toFixed(2)
+//         )
+//       }))
+//       .filter((i) => i.cost > 0)
+//       .sort((a, b) => b.cost - a.cost) ?? []
 
 //   return {
 //     groupBy,
+//     nextGroupBy: getNextGroupBy(groupBy),
 //     filters,
 //     items
 //   }
@@ -512,7 +529,7 @@ export const handler = async (
 
 // /**
 //  * -----------------------
-//  * MAIN LAMBDA ENTRY
+//  * MAIN HANDLER
 //  * -----------------------
 //  */
 
@@ -520,17 +537,8 @@ export const handler = async (
 //   event: APIGatewayProxyEventV2
 // ): Promise<{ statusCode: number; body: string }> => {
 //   try {
-//     console.log({ event })
-//     // const method = event.httpMethod
-//     const method = event.requestContext?.http?.method
-//     console.log({ method })
-//     //const method = event.requestContext.http.method
+//     const method = event.requestContext.http.method
 
-//     /**
-//      * -----------------------
-//      * ROUTER
-//      * -----------------------
-//      */
 //     if (method === 'GET') {
 //       const summary = await handleSummary()
 
@@ -541,9 +549,14 @@ export const handler = async (
 //     }
 
 //     if (method === 'POST') {
-//       const body: DrilldownRequest = JSON.parse(
-//         event.body ?? '{}'
-//       )
+//       const body: DrilldownRequest = JSON.parse(event.body ?? '{}')
+
+//       if (!body.groupBy) {
+//         return {
+//           statusCode: 400,
+//           body: JSON.stringify({ error: 'groupBy is required' })
+//         }
+//       }
 
 //       const result = await handleDrilldown(body)
 
@@ -555,18 +568,14 @@ export const handler = async (
 
 //     return {
 //       statusCode: 405,
-//       body: JSON.stringify({
-//         error: 'Method not allowed'
-//       })
+//       body: JSON.stringify({ error: 'Method not allowed' })
 //     }
 //   } catch (err) {
 //     console.error(err)
 
 //     return {
 //       statusCode: 500,
-//       body: JSON.stringify({
-//         error: 'Internal server error'
-//       })
+//       body: JSON.stringify({ error: 'Internal server error' })
 //     }
 //   }
 // }
