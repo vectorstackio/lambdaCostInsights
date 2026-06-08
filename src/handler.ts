@@ -71,13 +71,13 @@ type TrendPoint = {
   cost: number
 }
 
-type AWSRecommendation = {
-  estimatedMonthlySavings?: number
-  currentResourceType?: string
-  actionType?: string
-  currentResourceSummary?: string
-  recommendedResourceSummary?: string
-}
+// type AWSRecommendation = {
+//   estimatedMonthlySavings?: number
+//   currentResourceType?: string
+//   actionType?: string
+//   currentResourceSummary?: string
+//   recommendedResourceSummary?: string
+// }
 
 type CostIncreaseDriver = {
   service: string
@@ -695,8 +695,15 @@ async function handleSummary(): Promise<SummaryResponse> {
  */
 async function handleDrilldown(
   body: DrilldownRequest
-): Promise<DrilldownResponse & { total: number }> {
-
+): Promise<DrilldownResponse & {
+  total: number
+  context: {
+    depth: number
+    path: CostFilter[]
+    groupBy: Dimension
+    nextGroupBy?: Dimension
+  }
+}> {
   const filters = body.filters ?? []
   const groupBy = body.groupBy
 
@@ -716,7 +723,10 @@ async function handleDrilldown(
   const rawItems =
     res.ResultsByTime?.[0]?.Groups ?? []
 
-  const items: DrilldownItem[] = rawItems
+  // ----------------------------
+  // BASE TRANSFORM
+  // ----------------------------
+  const items = rawItems
     .map(g => ({
       key: g.Keys?.[0] ?? 'Unknown',
       cost: Number(
@@ -726,24 +736,101 @@ async function handleDrilldown(
       )
     }))
     .filter(i => i.cost > 0)
-    .sort((a, b) => b.cost - a.cost)
 
+  // ----------------------------
+  // TOTAL (for % calculations)
+  // ----------------------------
   const total = items.reduce((s, i) => s + i.cost, 0)
 
-  const enriched = items.map(i => ({
+  // ----------------------------
+  // STABLE SORT (IMPORTANT FIX)
+  // ----------------------------
+  const sorted = items.sort((a, b) => {
+    if (b.cost !== a.cost) return b.cost - a.cost
+    return a.key.localeCompare(b.key)
+  })
+
+  // ----------------------------
+  // ENRICH WITH PARENT PERCENTAGE
+  // ----------------------------
+  const enriched = sorted.map(i => ({
     ...i,
     percentageOfParent:
-      total === 0 ? 0 : Number(((i.cost / total) * 100).toFixed(2))
+      total === 0
+        ? 0
+        : Number(((i.cost / total) * 100).toFixed(2))
   }))
+
+  // ----------------------------
+  // CONTEXT (NEW)
+  // ----------------------------
+  const context = {
+    depth: filters.length,
+    path: filters,
+    groupBy,
+    nextGroupBy: getNextGroupBy(groupBy)
+  }
 
   return {
     groupBy,
-    nextGroupBy: getNextGroupBy(groupBy),
+    nextGroupBy: context.nextGroupBy,
     filters,
     items: enriched,
-    total
+    total,
+    context
   }
 }
+// async function handleDrilldown(
+//   body: DrilldownRequest
+// ): Promise<DrilldownResponse & { total: number }> {
+
+//   const filters = body.filters ?? []
+//   const groupBy = body.groupBy
+
+//   const start = getStartOfMonth()
+//   const end = toYMD(new Date())
+
+//   const res = await ce.send(
+//     new GetCostAndUsageCommand({
+//       TimePeriod: { Start: start, End: end },
+//       Granularity: 'MONTHLY',
+//       Metrics: ['UnblendedCost'],
+//       GroupBy: [{ Type: 'DIMENSION', Key: groupBy }],
+//       Filter: buildFilter(filters)
+//     })
+//   )
+
+//   const rawItems =
+//     res.ResultsByTime?.[0]?.Groups ?? []
+
+//   const items: DrilldownItem[] = rawItems
+//     .map(g => ({
+//       key: g.Keys?.[0] ?? 'Unknown',
+//       cost: Number(
+//         parseFloat(
+//           g.Metrics?.UnblendedCost?.Amount ?? '0'
+//         ).toFixed(2)
+//       )
+//     }))
+//     .filter(i => i.cost > 0)
+//     .sort((a, b) => b.cost - a.cost)
+
+//   const total = items.reduce((s, i) => s + i.cost, 0)
+
+//   const enriched = items.map(i => ({
+//     ...i,
+//     percentageOfParent:
+//       total === 0 ? 0 : Number(((i.cost / total) * 100).toFixed(2))
+//   }))
+
+//   return {
+//     groupBy,
+//     nextGroupBy: getNextGroupBy(groupBy),
+//     filters,
+//     items: enriched,
+//     total
+//   }
+// }
 // async function handleDrilldown(body: DrilldownRequest): Promise<DrilldownResponse> {
 //   const filters = body.filters ?? []
 //   const groupBy = body.groupBy
