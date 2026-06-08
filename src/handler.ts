@@ -72,6 +72,7 @@ type SummaryResponse = {
   potentialSavings: number
   recommendationCount: number
   topRecommendations: TopRecommendation[]
+  topCostIncreaseDrivers: CostIncreaseDriver[]
   metadata?: {
     generatedAt: string
     currency: string
@@ -84,6 +85,14 @@ type AWSRecommendation = {
   actionType?: string
   currentResourceSummary?: string
   recommendedResourceSummary?: string
+}
+
+type CostIncreaseDriver = {
+  service: string
+  currentCost: number
+  previousCost: number
+  increase: number
+  contributionPercent: number
 }
 
 /**
@@ -158,6 +167,53 @@ function buildFilter(filters: CostFilter[]): Expression | undefined {
   return {
     And: expressions
   }
+}
+
+function buildTopCostIncreaseDrivers(
+  current: { service: string; cost: number }[],
+  previous: { service: string; cost: number }[],
+  limit = 5
+): CostIncreaseDriver[] {
+  const previousMap = new Map(
+    previous.map(s => [s.service, s.cost])
+  )
+
+  const increases = current
+    .map(service => {
+      const previousCost =
+        previousMap.get(service.service) ?? 0
+
+      const increase = service.cost - previousCost
+
+      return {
+        service: service.service,
+        currentCost: service.cost,
+        previousCost,
+        increase
+      }
+    })
+    .filter(item => item.increase > 0)
+
+  const totalIncrease = increases.reduce(
+    (sum, item) => sum + item.increase,
+    0
+  )
+
+  return increases
+    .sort((a, b) => b.increase - a.increase)
+    .slice(0, limit)
+    .map(item => ({
+      ...item,
+      contributionPercent:
+        totalIncrease === 0
+          ? 0
+          : Number(
+            (
+              (item.increase / totalIncrease) *
+              100
+            ).toFixed(2)
+          )
+    }))
 }
 
 /**
@@ -306,6 +362,12 @@ async function handleSummary(): Promise<SummaryResponse> {
     previousData.byService
   )
 
+  const topCostIncreaseDrivers =
+    buildTopCostIncreaseDrivers(
+      currentData.byService,
+      previousData.byService
+    )
+
   let potentialSavings = 0
 
   const topRecommendations: TopRecommendation[] = (
@@ -322,12 +384,7 @@ async function handleSummary(): Promise<SummaryResponse> {
   })
 
   return {
-    // =========================
-    // ORIGINAL FRONTEND CONTRACT (UNCHANGED)
-    // =========================
-
     currentMonthCost: currentData.total,
-
     previousMonthCost: previousData.total,
 
     byService: currentData.byService.map(s => ({
@@ -335,19 +392,21 @@ async function handleSummary(): Promise<SummaryResponse> {
       cost: s.cost
     })),
 
-    potentialSavings: Number(potentialSavings.toFixed(2)),
-    recommendationCount: recRes.items?.length ?? 0,
-    topRecommendations: topRecommendations,
+    byServiceComparison: byService,
 
-    // =========================
-    // NEW FIELDS (SAFE ADDITIONS)
-    // =========================
+    topCostIncreaseDrivers,
 
     monthOverMonthChangePercent,
 
-    byServiceComparison: byService, // enhanced version (new shape)
-
     trend,
+
+    potentialSavings: Number(
+      potentialSavings.toFixed(2)
+    ),
+
+    recommendationCount: recRes.items?.length ?? 0,
+
+    topRecommendations: topRecommendations.slice(0, 5),
 
     metadata: {
       generatedAt: new Date().toISOString(),
