@@ -4,7 +4,9 @@ import {
   CostExplorerClient,
   GetCostAndUsageCommand,
   type Dimension,
-  type Expression
+  type Expression,
+  type ResultByTime,
+  type Group,
 } from '@aws-sdk/client-cost-explorer'
 
 import {
@@ -14,15 +16,15 @@ import {
 
 import type { APIGatewayProxyEventV2 } from 'aws-lambda'
 
-import type {
-  ResultByTime
-} from '@aws-sdk/client-cost-explorer'
+
 
 /**
  * -----------------------
  * Types
  * -----------------------
  */
+
+type CostGroup = Group
 
 type CostFilter = {
   key: Dimension
@@ -34,10 +36,6 @@ type DrilldownItem = {
   cost: number
   percentageOfParent?: number
 }
-// type DrilldownItem = {
-//   key: string
-//   cost: number
-// }
 
 type DrilldownRequest = {
   filters?: CostFilter[]
@@ -71,14 +69,6 @@ type TrendPoint = {
   cost: number
 }
 
-// type AWSRecommendation = {
-//   estimatedMonthlySavings?: number
-//   currentResourceType?: string
-//   actionType?: string
-//   currentResourceSummary?: string
-//   recommendedResourceSummary?: string
-// }
-
 type CostIncreaseDriver = {
   service: string
   currentCost: number
@@ -98,6 +88,22 @@ type ServiceAnomaly = {
   severity: 'low' | 'medium' | 'high'
 }
 
+type RootCauseNode = {
+  level: Dimension
+  key: string
+
+  currentCost: number
+  previousCost: number
+  change: number
+  changePercent: number
+
+  contributionToParent: number
+
+  isNew?: boolean
+
+  children?: RootCauseNode[]
+}
+
 type SummaryResponse = {
   currentMonthCost: number
   previousMonthCost: number
@@ -110,6 +116,8 @@ type SummaryResponse = {
   topRecommendations: TopRecommendation[]
   topCostIncreaseDrivers: CostIncreaseDriver[]
   anomalies: ServiceAnomaly[]
+  rootCauseTree: RootCauseNode[]
+  topCausalChains: RootCauseNode[]
   metadata?: {
     generatedAt: string
     currency: string
@@ -138,13 +146,6 @@ const DRILLDOWN_LEVELS: Dimension[] = [
   'LINKED_ACCOUNT',
   'RESOURCE_ID'
 ]
-// const DRILLDOWN_LEVELS: Dimension[] = [
-//   'SERVICE',
-//   'REGION',
-//   'USAGE_TYPE',
-//   'OPERATION',
-//   'LINKED_ACCOUNT'
-// ]
 
 function getNextGroupBy(current: Dimension): Dimension | undefined {
   const idx = DRILLDOWN_LEVELS.indexOf(current)
@@ -193,24 +194,6 @@ function buildFilter(filters: CostFilter[]): Expression | undefined {
   // FIX: prevent AWS AND error
   return expressions.length > 1 ? { And: expressions } : expressions[0]
 }
-// function buildFilter(filters: CostFilter[]): Expression | undefined {
-//   if (!filters.length) return undefined
-
-//   const expressions: Expression[] = filters.map((f) => ({
-//     Dimensions: {
-//       Key: f.key,
-//       Values: [f.value]
-//     }
-//   }))
-
-//   if (expressions.length === 1) {
-//     return expressions[0]
-//   }
-
-//   return {
-//     And: expressions
-//   }
-// }
 
 function buildTopCostIncreaseDrivers(
   current: { service: string; cost: number }[],
@@ -505,6 +488,132 @@ function buildAnomalies(
   )
 }
 
+async function getCostBreakdown(
+  start: string,
+  end: string,
+  groupBy: Dimension[],
+  filter?: Expression
+) {
+  const res = await ce.send(
+    new GetCostAndUsageCommand({
+      TimePeriod: { Start: start, End: end },
+      Granularity: 'MONTHLY',
+      Metrics: ['UnblendedCost'],
+      GroupBy: groupBy.map(g => ({ Type: 'DIMENSION', Key: g })),
+      Filter: filter
+    })
+  )
+
+  return res.ResultsByTime?.[0]?.Groups ?? []
+}
+
+function buildHierarchy(
+  groups: CostGroup[],
+  levels: Dimension[]
+): RootCauseNode[] {
+  const level = levels[0]
+  const nextLevels = levels.slice(1)
+
+  const map = new Map<
+    string,
+    {
+      key: string
+      level: Dimension
+      currentCost: number
+      previousCost: number
+      childrenRaw: CostGroup[]
+    }
+  >()
+
+  for (const g of groups) {
+    const key = g.Keys?.[0] ?? 'Unknown'
+
+    const cost = Number(
+      g.Metrics?.UnblendedCost?.Amount ?? 0
+    )
+
+    const existing = map.get(key)
+
+    if (!existing) {
+      map.set(key, {
+        key,
+        level,
+        currentCost: cost,
+        previousCost: 0,
+        childrenRaw: [g]
+      })
+    } else {
+      existing.currentCost += cost
+      existing.childrenRaw.push(g)
+    }
+  }
+
+  const nodes: RootCauseNode[] = []
+
+  for (const node of map.values()) {
+    const children =
+      nextLevels.length > 0
+        ? buildHierarchy(node.childrenRaw, nextLevels)
+        : undefined
+
+    const change = node.currentCost - node.previousCost
+
+    nodes.push({
+      level: node.level,
+      key: node.key,
+      currentCost: node.currentCost,
+      previousCost: node.previousCost,
+      change,
+      changePercent:
+        node.previousCost === 0
+          ? 0
+          : Number(
+            ((change / node.previousCost) * 100).toFixed(2)
+          ),
+      contributionToParent: 0,
+      children
+    })
+  }
+
+  return nodes.sort(
+    (a, b) => b.currentCost - a.currentCost
+  )
+}
+
+function enrichWithPrevious(
+  current: RootCauseNode[],
+  previousMap: Map<string, number>
+): RootCauseNode[] {
+
+  return current.map(node => {
+    const prev = previousMap.get(node.key) ?? 0
+
+    const change = node.currentCost - prev
+
+    const changePercent =
+      prev === 0 ? 100 : (change / prev) * 100
+
+    const children = node.children
+      ? enrichWithPrevious(node.children, previousMap)
+      : undefined
+
+    return {
+      ...node,
+      previousCost: prev,
+      change,
+      changePercent,
+      isNew: prev === 0,
+      children
+    }
+  })
+}
+
+function extractTopCausalChain(nodes: RootCauseNode[]): RootCauseNode[] {
+  return nodes
+    .sort((a, b) => b.change - a.change)
+    .slice(0, 3)
+}
+
 /**
  * -----------------------
  * SUMMARY HANDLER
@@ -564,11 +673,37 @@ async function handleSummary(): Promise<SummaryResponse> {
       }
     })
 
-  const serviceHistoryMap =
-    buildServiceHistoryMap(serviceHistory)
+  const serviceHistoryMap = buildServiceHistoryMap(serviceHistory)
 
-  const anomalies =
-    buildAnomalies(serviceHistoryMap)
+  const anomalies = buildAnomalies(serviceHistoryMap)
+
+  const currentRaw = await getCostBreakdown(
+    current,
+    end,
+    ['SERVICE']
+  )
+
+  const previousRaw = await getCostBreakdown(
+    prev.start,
+    prev.end,
+    ['SERVICE']
+  )
+
+  const tree = buildHierarchy(
+    currentRaw,
+    ['SERVICE', 'REGION', 'USAGE_TYPE']
+  )
+
+  const topCausalChains = extractTopCausalChain(tree)
+
+  const previousMap = new Map(
+    previousRaw.map(g => [
+      g.Keys?.[0] ?? 'Unknown',
+      Number(g.Metrics?.UnblendedCost?.Amount ?? 0)
+    ])
+  )
+
+  const rootCauseTree = enrichWithPrevious(tree, previousMap)
 
   return {
     currentMonthCost: currentData.total,
@@ -593,11 +728,13 @@ async function handleSummary(): Promise<SummaryResponse> {
       potentialSavings.toFixed(2)
     ),
 
-    recommendationCount:
-      recRes.items?.length ?? 0,
+    recommendationCount: recRes.items?.length ?? 0,
 
-    topRecommendations:
-      topRecommendations.slice(0, 5),
+    topRecommendations: topRecommendations,
+
+    rootCauseTree,
+
+    topCausalChains,
 
     metadata: {
       generatedAt: new Date().toISOString(),
@@ -605,92 +742,10 @@ async function handleSummary(): Promise<SummaryResponse> {
     }
   }
 }
-// async function handleSummary(): Promise<SummaryResponse> {
-//   const current = getStartOfMonth()
-//   const end = toYMD(new Date())
-
-//   const prev = getPreviousMonthRange()
-
-//   const [currentData, previousData, recRes, trend, serviceHistory] = await Promise.all([
-//     getCostData(current, end),
-//     getCostData(prev.start, prev.end),
-//     coh.send(new ListRecommendationsCommand({ maxResults: 100 })),
-//     getTrend(),
-//     getServiceHistory()
-//   ])
-
-//   const monthOverMonthChangePercent = calculateMoMChange(
-//     currentData.total,
-//     previousData.total
-//   )
-
-//   const byService = buildServiceComparison(
-//     currentData.byService,
-//     previousData.byService
-//   )
-
-//   const topCostIncreaseDrivers =
-//     buildTopCostIncreaseDrivers(
-//       currentData.byService,
-//       previousData.byService
-//     )
-
-//   let potentialSavings = 0
-
-//   const topRecommendations: TopRecommendation[] = (
-//     (recRes.items ?? []) as AWSRecommendation[]
-//   ).map(r => {
-//     potentialSavings += r.estimatedMonthlySavings ?? 0
-
-//     return {
-//       resourceType: r.currentResourceType ?? 'Unknown',
-//       action: r.actionType ?? 'Unknown',
-//       current: r.currentResourceSummary ?? 'N/A',
-//       recommended: r.recommendedResourceSummary ?? 'N/A'
-//     }
-//   })
-
-//   const serviceHistoryMap = buildServiceHistoryMap(serviceHistory)
-
-//   const anomalies = buildAnomalies(serviceHistoryMap)
-
-//   return {
-//     currentMonthCost: currentData.total,
-//     previousMonthCost: previousData.total,
-
-//     byService: currentData.byService.map(s => ({
-//       service: s.service,
-//       cost: s.cost
-//     })),
-
-//     byServiceComparison: byService,
-
-//     topCostIncreaseDrivers,
-
-//     monthOverMonthChangePercent,
-
-//     trend,
-
-//     anomalies,
-
-//     potentialSavings: Number(
-//       potentialSavings.toFixed(2)
-//     ),
-
-//     recommendationCount: recRes.items?.length ?? 0,
-
-//     topRecommendations: topRecommendations.slice(0, 5),
-
-//     metadata: {
-//       generatedAt: new Date().toISOString(),
-//       currency: 'USD'
-//     }
-//   }
-// }
 
 /**
  * -----------------------
- * DRILLDOWN HANDLER (unchanged logic)
+ * DRILLDOWN HANDLER
  * -----------------------
  */
 async function handleDrilldown(
