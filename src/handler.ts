@@ -166,6 +166,30 @@ function getNextGroupBy(current: Dimension): Dimension | undefined {
  * -----------------------
  */
 
+function getMonthRange(month: string) {
+  const [year, monthIndex] = month.split('-').map(Number)
+
+  const start = new Date(year, monthIndex - 1, 1)
+  const end = new Date(year, monthIndex, 0) // last day of month
+
+  return {
+    start: toYMD(start),
+    end: toYMD(end)
+  }
+}
+
+function getPreviousMonthFrom(month: string) {
+  const [year, monthIndex] = month.split('-').map(Number)
+
+  const prevStart = new Date(year, monthIndex - 2, 1)
+  const prevEnd = new Date(year, monthIndex - 1, 0)
+
+  return {
+    start: toYMD(prevStart),
+    end: toYMD(prevEnd)
+  }
+}
+
 function toYMD(date: Date): string {
   return date.toISOString().split('T')[0]
 }
@@ -627,10 +651,23 @@ function extractTopCausalChain(nodes: RootCauseNode[]): RootCauseNode[] {
  * SUMMARY HANDLER
  * -----------------------
  */
-async function handleSummary(): Promise<SummaryResponse> {
-  const current = getStartOfMonth()
-  const end = toYMD(new Date())
-  const prev = getPreviousMonthRange()
+async function handleSummary(month?: string): Promise<SummaryResponse> {
+  const now = new Date()
+
+  const currentRange = month
+    ? getMonthRange(month)
+    : {
+      start: getStartOfMonth(),
+      end: toYMD(now)
+    }
+
+  const prevRange = month
+    ? getPreviousMonthFrom(month)
+    : getPreviousMonthRange()
+
+  // const current = getStartOfMonth()
+  // const end = toYMD(new Date())
+  // const prev = getPreviousMonthRange()
 
   const [
     currentData,
@@ -639,8 +676,10 @@ async function handleSummary(): Promise<SummaryResponse> {
     trend,
     serviceHistory
   ] = await Promise.all([
-    getCostData(current, end),
-    getCostData(prev.start, prev.end),
+    // getCostData(current, end),
+    // getCostData(prev.start, prev.end),
+    getCostData(currentRange.start, currentRange.end),
+    getCostData(prevRange.start, prevRange.end),
     coh.send(new ListRecommendationsCommand({ maxResults: 100 })),
     getTrend(),
     getServiceHistory()
@@ -686,16 +725,28 @@ async function handleSummary(): Promise<SummaryResponse> {
   const anomalies = buildAnomalies(serviceHistoryMap)
 
   const currentRaw = await getCostBreakdown(
-    current,
-    end,
+    currentRange.start,
+    currentRange.end,
     ['SERVICE']
   )
 
   const previousRaw = await getCostBreakdown(
-    prev.start,
-    prev.end,
+    prevRange.start,
+    prevRange.end,
     ['SERVICE']
   )
+
+  // const currentRaw = await getCostBreakdown(
+  //   current,
+  //   end,
+  //   ['SERVICE']
+  // )
+
+  // const previousRaw = await getCostBreakdown(
+  //   prev.start,
+  //   prev.end,
+  //   ['SERVICE']
+  // )
 
   const tree = buildHierarchy(
     currentRaw,
@@ -857,7 +908,8 @@ export const handler = async (
     const method = event.requestContext.http.method
 
     if (method === 'GET') {
-      const summary = await handleSummary()
+      const month = event.queryStringParameters?.month
+      const summary = await handleSummary(month)
 
       return {
         statusCode: 200,
