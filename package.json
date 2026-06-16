@@ -9,6 +9,7 @@
   "scripts": {
     "test": "test",
     "lint": "eslint src",
+    "codelint": "npm run lint src/ && tsc --noEmit",
     "build": "node esbuild.mjs",
     "zip": "cd dist && zip -r function.zip .",
     "deploy": "npm run lint && npm run build && npm run zip && bash scripts/deploy.sh"

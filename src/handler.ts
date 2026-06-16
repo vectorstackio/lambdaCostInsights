@@ -140,12 +140,20 @@ const coh = new CostOptimizationHubClient({ region: 'us-east-1' })
  */
 const DRILLDOWN_LEVELS: Dimension[] = [
   'SERVICE',
-  'REGION',
   'USAGE_TYPE',
+  'REGION',
   'OPERATION',
   'LINKED_ACCOUNT',
   'RESOURCE_ID'
 ]
+// const DRILLDOWN_LEVELS: Dimension[] = [
+//   'SERVICE',
+//   'REGION',
+//   'USAGE_TYPE',
+//   'OPERATION',
+//   'LINKED_ACCOUNT',
+//   'RESOURCE_ID'
+// ]
 
 function getNextGroupBy(current: Dimension): Dimension | undefined {
   const idx = DRILLDOWN_LEVELS.indexOf(current)
@@ -835,117 +843,6 @@ async function handleDrilldown(
     context
   }
 }
-// async function handleDrilldown(
-//   body: DrilldownRequest
-// ): Promise<DrilldownResponse & { total: number }> {
-
-//   const filters = body.filters ?? []
-//   const groupBy = body.groupBy
-
-//   const start = getStartOfMonth()
-//   const end = toYMD(new Date())
-
-//   const res = await ce.send(
-//     new GetCostAndUsageCommand({
-//       TimePeriod: { Start: start, End: end },
-//       Granularity: 'MONTHLY',
-//       Metrics: ['UnblendedCost'],
-//       GroupBy: [{ Type: 'DIMENSION', Key: groupBy }],
-//       Filter: buildFilter(filters)
-//     })
-//   )
-
-//   const rawItems =
-//     res.ResultsByTime?.[0]?.Groups ?? []
-
-//   const items: DrilldownItem[] = rawItems
-//     .map(g => ({
-//       key: g.Keys?.[0] ?? 'Unknown',
-//       cost: Number(
-//         parseFloat(
-//           g.Metrics?.UnblendedCost?.Amount ?? '0'
-//         ).toFixed(2)
-//       )
-//     }))
-//     .filter(i => i.cost > 0)
-//     .sort((a, b) => b.cost - a.cost)
-
-//   const total = items.reduce((s, i) => s + i.cost, 0)
-
-//   const enriched = items.map(i => ({
-//     ...i,
-//     percentageOfParent:
-//       total === 0 ? 0 : Number(((i.cost / total) * 100).toFixed(2))
-//   }))
-
-//   return {
-//     groupBy,
-//     nextGroupBy: getNextGroupBy(groupBy),
-//     filters,
-//     items: enriched,
-//     total
-//   }
-// }
-// async function handleDrilldown(body: DrilldownRequest): Promise<DrilldownResponse> {
-//   const filters = body.filters ?? []
-//   const groupBy = body.groupBy
-
-//   const start = getStartOfMonth()
-//   const end = toYMD(new Date())
-
-//   const res = await ce.send(
-//     new GetCostAndUsageCommand({
-//       TimePeriod: { Start: start, End: end },
-//       Granularity: 'MONTHLY',
-//       Metrics: ['UnblendedCost'],
-//       GroupBy: [{ Type: 'DIMENSION', Key: groupBy }],
-//       Filter: buildFilter(filters)
-//     })
-//   )
-
-//   const items =
-//     res.ResultsByTime?.[0]?.Groups
-//       ?.map(g => ({
-//         key: g.Keys?.[0] ?? 'Unknown',
-//         cost: Number(parseFloat(g.Metrics?.UnblendedCost?.Amount ?? '0').toFixed(2))
-//       }))
-//       .filter(i => i.cost > 0)
-//       .sort((a, b) => b.cost - a.cost) ?? []
-
-//   return {
-//     groupBy,
-//     nextGroupBy: getNextGroupBy(groupBy),
-//     filters,
-//     items
-//   }
-// }
-
-// async function getRootCauseTree(service: string) {
-//   const serviceLevel = await handleDrilldown({
-//     groupBy: 'SERVICE',
-//     filters: []
-//   })
-
-//   const regionLevel = await handleDrilldown({
-//     groupBy: 'REGION',
-//     filters: [
-//       { key: 'SERVICE', value: service }
-//     ]
-//   })
-
-//   const usageLevel = await handleDrilldown({
-//     groupBy: 'USAGE_TYPE',
-//     filters: [
-//       { key: 'SERVICE', value: service }
-//     ]
-//   })
-
-//   return {
-//     serviceLevel,
-//     regionLevel,
-//     usageLevel
-//   }
-// }
 
 /**
  * -----------------------
