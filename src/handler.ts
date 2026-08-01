@@ -651,7 +651,9 @@ function extractTopCausalChain(nodes: RootCauseNode[]): RootCauseNode[] {
  * SUMMARY HANDLER
  * -----------------------
  */
-async function handleSummary(month?: string): Promise<SummaryResponse> {
+async function handleSummary(
+  month?: string
+): Promise<SummaryResponse> {
   const now = new Date()
 
   const currentRange = month
@@ -665,9 +667,12 @@ async function handleSummary(month?: string): Promise<SummaryResponse> {
     ? getPreviousMonthFrom(month)
     : getPreviousMonthRange()
 
-  // const current = getStartOfMonth()
-  // const end = toYMD(new Date())
-  // const prev = getPreviousMonthRange()
+  // Cost Explorer requires Start < End.
+  // On the first day of the current month, there is
+  // no completed day of current-month cost data yet.
+  const isEmptyCurrentMonth =
+    !month &&
+    currentRange.start === currentRange.end
 
   const [
     currentData,
@@ -676,12 +681,29 @@ async function handleSummary(month?: string): Promise<SummaryResponse> {
     trend,
     serviceHistory
   ] = await Promise.all([
-    // getCostData(current, end),
-    // getCostData(prev.start, prev.end),
-    getCostData(currentRange.start, currentRange.end),
-    getCostData(prevRange.start, prevRange.end),
-    coh.send(new ListRecommendationsCommand({ maxResults: 100 })),
+    isEmptyCurrentMonth
+      ? Promise.resolve({
+        total: 0,
+        byService: []
+      })
+      : getCostData(
+        currentRange.start,
+        currentRange.end
+      ),
+
+    getCostData(
+      prevRange.start,
+      prevRange.end
+    ),
+
+    coh.send(
+      new ListRecommendationsCommand({
+        maxResults: 100
+      })
+    ),
+
     getTrend(),
+
     getServiceHistory()
   ])
 
@@ -712,68 +734,83 @@ async function handleSummary(month?: string): Promise<SummaryResponse> {
       return {
         resourceType:
           r.currentResourceType ?? 'Unknown',
-        action: r.actionType ?? 'Unknown',
+
+        action:
+          r.actionType ?? 'Unknown',
+
         current:
           r.currentResourceSummary ?? 'N/A',
+
         recommended:
           r.recommendedResourceSummary ?? 'N/A'
       }
     })
 
-  const serviceHistoryMap = buildServiceHistoryMap(serviceHistory)
+  const serviceHistoryMap =
+    buildServiceHistoryMap(serviceHistory)
 
-  const anomalies = buildAnomalies(serviceHistoryMap)
+  const anomalies =
+    buildAnomalies(serviceHistoryMap)
 
-  const currentRaw = await getCostBreakdown(
-    currentRange.start,
-    currentRange.end,
-    ['SERVICE']
-  )
+  // There is no valid current-month Cost Explorer
+  // range on the first day of the month.
+  const currentRaw = isEmptyCurrentMonth
+    ? []
+    : await getCostBreakdown(
+      currentRange.start,
+      currentRange.end,
+      ['SERVICE']
+    )
 
-  const previousRaw = await getCostBreakdown(
-    prevRange.start,
-    prevRange.end,
-    ['SERVICE']
-  )
-
-  // const currentRaw = await getCostBreakdown(
-  //   current,
-  //   end,
-  //   ['SERVICE']
-  // )
-
-  // const previousRaw = await getCostBreakdown(
-  //   prev.start,
-  //   prev.end,
-  //   ['SERVICE']
-  // )
+  const previousRaw =
+    await getCostBreakdown(
+      prevRange.start,
+      prevRange.end,
+      ['SERVICE']
+    )
 
   const tree = buildHierarchy(
     currentRaw,
-    ['SERVICE', 'REGION', 'USAGE_TYPE']
+    [
+      'SERVICE',
+      'REGION',
+      'USAGE_TYPE'
+    ]
   )
 
-  const topCausalChains = extractTopCausalChain(tree)
+  const topCausalChains =
+    extractTopCausalChain(tree)
 
   const previousMap = new Map(
     previousRaw.map(g => [
       g.Keys?.[0] ?? 'Unknown',
-      Number(g.Metrics?.UnblendedCost?.Amount ?? 0)
+      Number(
+        g.Metrics?.UnblendedCost?.Amount ?? 0
+      )
     ])
   )
 
-  const rootCauseTree = enrichWithPrevious(tree, previousMap)
+  const rootCauseTree =
+    enrichWithPrevious(
+      tree,
+      previousMap
+    )
 
   return {
-    currentMonthCost: currentData.total,
-    previousMonthCost: previousData.total,
+    currentMonthCost:
+      currentData.total,
 
-    byService: currentData.byService.map(s => ({
-      service: s.service,
-      cost: s.cost
-    })),
+    previousMonthCost:
+      previousData.total,
 
-    byServiceComparison: byService,
+    byService:
+      currentData.byService.map(s => ({
+        service: s.service,
+        cost: s.cost
+      })),
+
+    byServiceComparison:
+      byService,
 
     topCostIncreaseDrivers,
 
@@ -783,20 +820,24 @@ async function handleSummary(month?: string): Promise<SummaryResponse> {
 
     anomalies,
 
-    potentialSavings: Number(
-      potentialSavings.toFixed(2)
-    ),
+    potentialSavings:
+      Number(
+        potentialSavings.toFixed(2)
+      ),
 
-    recommendationCount: recRes.items?.length ?? 0,
+    recommendationCount:
+      recRes.items?.length ?? 0,
 
-    topRecommendations: topRecommendations,
+    topRecommendations,
 
     rootCauseTree,
 
     topCausalChains,
 
     metadata: {
-      generatedAt: new Date().toISOString(),
+      generatedAt:
+        new Date().toISOString(),
+
       currency: 'USD'
     }
   }
@@ -809,30 +850,91 @@ async function handleSummary(month?: string): Promise<SummaryResponse> {
  */
 async function handleDrilldown(
   body: DrilldownRequest
-): Promise<DrilldownResponse & {
-  total: number
-  context: {
-    depth: number
-    path: CostFilter[]
-    groupBy: Dimension
-    nextGroupBy?: Dimension
+): Promise<
+  DrilldownResponse & {
+    total: number
+    context: {
+      depth: number
+      path: CostFilter[]
+      groupBy: Dimension
+      nextGroupBy?: Dimension
+    }
   }
-}> {
-  const filters = body.filters ?? []
-  const groupBy = body.groupBy
+> {
+  const filters =
+    body.filters ?? []
 
-  const start = getStartOfMonth()
-  const end = toYMD(new Date())
+  const groupBy =
+    body.groupBy
 
-  const res = await ce.send(
-    new GetCostAndUsageCommand({
-      TimePeriod: { Start: start, End: end },
-      Granularity: 'MONTHLY',
-      Metrics: ['UnblendedCost'],
-      GroupBy: [{ Type: 'DIMENSION', Key: groupBy }],
-      Filter: buildFilter(filters)
-    })
-  )
+  const start =
+    getStartOfMonth()
+
+  const end =
+    toYMD(new Date())
+
+  const isEmptyCurrentMonth =
+    start === end
+
+  // Cost Explorer requires Start < End.
+  // On the first day of the month there is no
+  // completed current-month period to drill into.
+  if (isEmptyCurrentMonth) {
+    const context = {
+      depth:
+        filters.length,
+
+      path:
+        filters,
+
+      groupBy,
+
+      nextGroupBy:
+        getNextGroupBy(groupBy)
+    }
+
+    return {
+      groupBy,
+
+      nextGroupBy:
+        context.nextGroupBy,
+
+      filters,
+
+      items: [],
+
+      total: 0,
+
+      context
+    }
+  }
+
+  const res =
+    await ce.send(
+      new GetCostAndUsageCommand({
+        TimePeriod: {
+          Start: start,
+          End: end
+        },
+
+        Granularity:
+          'MONTHLY',
+
+        Metrics: [
+          'UnblendedCost'
+        ],
+
+        GroupBy: [
+          {
+            Type: 'DIMENSION',
+            Key: groupBy
+          }
+        ],
+
+        Filter:
+          buildFilter(filters)
+      })
+    )
 
   const rawItems =
     res.ResultsByTime?.[0]?.Groups ?? []
@@ -840,57 +942,105 @@ async function handleDrilldown(
   // ----------------------------
   // BASE TRANSFORM
   // ----------------------------
-  const items = rawItems
-    .map(g => ({
-      key: g.Keys?.[0] ?? 'Unknown',
-      cost: Number(
-        parseFloat(
-          g.Metrics?.UnblendedCost?.Amount ?? '0'
-        ).toFixed(2)
+  const items =
+    rawItems
+      .map(g => ({
+        key:
+          g.Keys?.[0] ??
+          'Unknown',
+
+        cost:
+          Number(
+            parseFloat(
+              g.Metrics
+                ?.UnblendedCost
+                ?.Amount ?? '0'
+            ).toFixed(2)
+          )
+      }))
+      .filter(
+        i => i.cost > 0
       )
+
+  // ----------------------------
+  // TOTAL
+  // ----------------------------
+  const total =
+    items.reduce(
+      (s, i) =>
+        s + i.cost,
+      0
+    )
+
+  // ----------------------------
+  // STABLE SORT
+  // ----------------------------
+  const sorted =
+    items.sort(
+      (a, b) => {
+        if (
+          b.cost !== a.cost
+        ) {
+          return (
+            b.cost -
+            a.cost
+          )
+        }
+
+        return a.key.localeCompare(
+          b.key
+        )
+      }
+    )
+
+  // ----------------------------
+  // ENRICH WITH PARENT %
+  // ----------------------------
+  const enriched =
+    sorted.map(i => ({
+      ...i,
+
+      percentageOfParent:
+        total === 0
+          ? 0
+          : Number(
+            (
+              (i.cost /
+                total) *
+              100
+            ).toFixed(2)
+          )
     }))
-    .filter(i => i.cost > 0)
 
   // ----------------------------
-  // TOTAL (for % calculations)
-  // ----------------------------
-  const total = items.reduce((s, i) => s + i.cost, 0)
-
-  // ----------------------------
-  // STABLE SORT (IMPORTANT FIX)
-  // ----------------------------
-  const sorted = items.sort((a, b) => {
-    if (b.cost !== a.cost) return b.cost - a.cost
-    return a.key.localeCompare(b.key)
-  })
-
-  // ----------------------------
-  // ENRICH WITH PARENT PERCENTAGE
-  // ----------------------------
-  const enriched = sorted.map(i => ({
-    ...i,
-    percentageOfParent:
-      total === 0
-        ? 0
-        : Number(((i.cost / total) * 100).toFixed(2))
-  }))
-
-  // ----------------------------
-  // CONTEXT (NEW)
+  // CONTEXT
   // ----------------------------
   const context = {
-    depth: filters.length,
-    path: filters,
+    depth:
+      filters.length,
+
+    path:
+      filters,
+
     groupBy,
-    nextGroupBy: getNextGroupBy(groupBy)
+
+    nextGroupBy:
+      getNextGroupBy(groupBy)
   }
 
   return {
     groupBy,
-    nextGroupBy: context.nextGroupBy,
+
+    nextGroupBy:
+      context.nextGroupBy,
+
     filters,
-    items: enriched,
+
+    items:
+      enriched,
+
     total,
+
     context
   }
 }
