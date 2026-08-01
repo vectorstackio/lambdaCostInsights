@@ -991,7 +991,7 @@ export const handler = async (
 
     return {
       statusCode: 500,
-      body: JSON.stringify({ error: 'Internal server error' })
+      body: JSON.stringify({ error: 'Internal server error in costInsights Lambda' })
     }
   }
 }
