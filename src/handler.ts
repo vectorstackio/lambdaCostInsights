@@ -16,8 +16,6 @@ import {
 
 import type { APIGatewayProxyEventV2 } from 'aws-lambda'
 
-
-
 /**
  * -----------------------
  * Types
@@ -146,16 +144,8 @@ const DRILLDOWN_LEVELS: Dimension[] = [
   'LINKED_ACCOUNT',
   'RESOURCE_ID'
 ]
-// const DRILLDOWN_LEVELS: Dimension[] = [
-//   'SERVICE',
-//   'REGION',
-//   'USAGE_TYPE',
-//   'OPERATION',
-//   'LINKED_ACCOUNT',
-//   'RESOURCE_ID'
-// ]
 
-function getNextGroupBy(current: Dimension): Dimension | undefined {
+const getNextGroupBy = (current: Dimension): Dimension | undefined => {
   const idx = DRILLDOWN_LEVELS.indexOf(current)
   return DRILLDOWN_LEVELS[idx + 1]
 }
@@ -166,9 +156,8 @@ function getNextGroupBy(current: Dimension): Dimension | undefined {
  * -----------------------
  */
 
-function getMonthRange(month: string) {
+const getMonthRange = (month: string) => {
   const [year, monthIndex] = month.split('-').map(Number)
-
   const start = new Date(year, monthIndex - 1, 1)
   const end = new Date(year, monthIndex, 0) // last day of month
 
@@ -178,9 +167,8 @@ function getMonthRange(month: string) {
   }
 }
 
-function getPreviousMonthFrom(month: string) {
+const getPreviousMonthFrom = (month: string) => {
   const [year, monthIndex] = month.split('-').map(Number)
-
   const prevStart = new Date(year, monthIndex - 2, 1)
   const prevEnd = new Date(year, monthIndex - 1, 0)
 
@@ -190,18 +178,17 @@ function getPreviousMonthFrom(month: string) {
   }
 }
 
-function toYMD(date: Date): string {
+const toYMD = (date: Date): string => {
   return date.toISOString().split('T')[0]
 }
 
-function getStartOfMonth(): string {
+const getStartOfMonth = (): string => {
   const now = new Date()
   return toYMD(new Date(now.getFullYear(), now.getMonth(), 1))
 }
 
-function getPreviousMonthRange() {
+const getPreviousMonthRange = () => {
   const now = new Date()
-
   const start = new Date(now.getFullYear(), now.getMonth() - 1, 1)
   const end = new Date(now.getFullYear(), now.getMonth(), 0)
 
@@ -211,7 +198,7 @@ function getPreviousMonthRange() {
   }
 }
 
-function buildFilter(filters: CostFilter[]): Expression | undefined {
+const buildFilter = (filters: CostFilter[]): Expression | undefined => {
   if (!filters.length) return undefined
 
   const expressions: Expression[] = filters.map(f => ({
@@ -227,11 +214,11 @@ function buildFilter(filters: CostFilter[]): Expression | undefined {
   return expressions.length > 1 ? { And: expressions } : expressions[0]
 }
 
-function buildTopCostIncreaseDrivers(
+const buildTopCostIncreaseDrivers = (
   current: { service: string; cost: number }[],
   previous: { service: string; cost: number }[],
   limit = 5
-): CostIncreaseDriver[] {
+): CostIncreaseDriver[] => {
   const previousMap = new Map(
     previous.map(s => [s.service, s.cost])
   )
@@ -283,7 +270,7 @@ function buildTopCostIncreaseDrivers(
  * -----------------------
  */
 
-async function getCostData(start: string, end: string) {
+const getCostData = async (start: string, end: string) => {
   const res = await ce.send(
     new GetCostAndUsageCommand({
       TimePeriod: { Start: start, End: end },
@@ -313,15 +300,16 @@ async function getCostData(start: string, end: string) {
  * -----------------------
  */
 
-function calculateMoMChange(current: number, previous: number) {
+const calculateMoMChange = (current: number, previous: number) => {
   if (previous === 0) return 0
+
   return Number((((current - previous) / previous) * 100).toFixed(2))
 }
 
-function buildServiceComparison(
+const buildServiceComparison = (
   current: { service: string; cost: number }[],
   previous: { service: string; cost: number }[]
-): ServiceComparison[] {
+): ServiceComparison[] => {
   const prevMap = new Map(previous.map(s => [s.service, s.cost]))
 
   const allServices = new Set([
@@ -353,7 +341,7 @@ function buildServiceComparison(
  * -----------------------
  */
 
-function getLast6Months() {
+const getLast6Months = () => {
   const now = new Date()
 
   return Array.from({ length: 6 }).map((_, i) => {
@@ -368,7 +356,7 @@ function getLast6Months() {
   })
 }
 
-async function getTrend(): Promise<TrendPoint[]> {
+const getTrend = async (): Promise<TrendPoint[]> => {
   const months = getLast6Months()
 
   const results = await Promise.all(
@@ -394,7 +382,7 @@ async function getTrend(): Promise<TrendPoint[]> {
   return results
 }
 
-async function getServiceHistory(months = 6) {
+const getServiceHistory = async (months = 6) => {
   const now = new Date()
 
   const start = new Date(
@@ -429,14 +417,14 @@ async function getServiceHistory(months = 6) {
   return res.ResultsByTime ?? []
 }
 
-function average(values: number[]) {
+const average = (values: number[]) => {
   return (
     values.reduce((a, b) => a + b, 0) /
     values.length
   )
 }
 
-function stdDev(values: number[]) {
+const stdDev = (values: number[]) => {
   const avg = average(values)
 
   const variance =
@@ -448,9 +436,9 @@ function stdDev(values: number[]) {
   return Math.sqrt(variance)
 }
 
-function buildServiceHistoryMap(
+const buildServiceHistoryMap = (
   resultsByTime: ResultByTime[]
-): Record<string, number[]> {
+): Record<string, number[]> => {
   const history: Record<string, number[]> = {}
 
   for (const month of resultsByTime) {
@@ -472,14 +460,12 @@ function buildServiceHistoryMap(
   return history
 }
 
-function buildAnomalies(
+const buildAnomalies = (
   serviceHistory: Record<string, number[]>
-): ServiceAnomaly[] {
+): ServiceAnomaly[] => {
   const anomalies: ServiceAnomaly[] = []
 
-  for (const [service, history] of Object.entries(
-    serviceHistory
-  )) {
+  for (const [service, history] of Object.entries(serviceHistory)) {
     if (history.length < 4) continue
 
     const current = history[history.length - 1]
@@ -520,12 +506,12 @@ function buildAnomalies(
   )
 }
 
-async function getCostBreakdown(
+const getCostBreakdown = async (
   start: string,
   end: string,
   groupBy: Dimension[],
   filter?: Expression
-) {
+) => {
   const res = await ce.send(
     new GetCostAndUsageCommand({
       TimePeriod: { Start: start, End: end },
@@ -539,10 +525,10 @@ async function getCostBreakdown(
   return res.ResultsByTime?.[0]?.Groups ?? []
 }
 
-function buildHierarchy(
+const buildHierarchy = (
   groups: CostGroup[],
   levels: Dimension[]
-): RootCauseNode[] {
+): RootCauseNode[] => {
   const level = levels[0]
   const nextLevels = levels.slice(1)
 
@@ -559,11 +545,7 @@ function buildHierarchy(
 
   for (const g of groups) {
     const key = g.Keys?.[0] ?? 'Unknown'
-
-    const cost = Number(
-      g.Metrics?.UnblendedCost?.Amount ?? 0
-    )
-
+    const cost = Number(g.Metrics?.UnblendedCost?.Amount ?? 0)
     const existing = map.get(key)
 
     if (!existing) {
@@ -612,10 +594,10 @@ function buildHierarchy(
   )
 }
 
-function enrichWithPrevious(
+const enrichWithPrevious = (
   current: RootCauseNode[],
   previousMap: Map<string, number>
-): RootCauseNode[] {
+): RootCauseNode[] => {
 
   return current.map(node => {
     const prev = previousMap.get(node.key) ?? 0
@@ -640,7 +622,7 @@ function enrichWithPrevious(
   })
 }
 
-function extractTopCausalChain(nodes: RootCauseNode[]): RootCauseNode[] {
+const extractTopCausalChain = (nodes: RootCauseNode[]): RootCauseNode[] => {
   return nodes
     .sort((a, b) => b.change - a.change)
     .slice(0, 3)
@@ -651,9 +633,9 @@ function extractTopCausalChain(nodes: RootCauseNode[]): RootCauseNode[] {
  * SUMMARY HANDLER
  * -----------------------
  */
-async function handleSummary(
+const handleSummary = async (
   month?: string
-): Promise<SummaryResponse> {
+): Promise<SummaryResponse> => {
   const now = new Date()
 
   const currentRange = month
@@ -670,9 +652,7 @@ async function handleSummary(
   // Cost Explorer requires Start < End.
   // On the first day of the current month, there is
   // no completed day of current-month cost data yet.
-  const isEmptyCurrentMonth =
-    !month &&
-    currentRange.start === currentRange.end
+  const isEmptyCurrentMonth = !month && currentRange.start === currentRange.end
 
   const [
     currentData,
@@ -696,33 +676,14 @@ async function handleSummary(
       prevRange.end
     ),
 
-    coh.send(
-      new ListRecommendationsCommand({
-        maxResults: 100
-      })
-    ),
-
+    coh.send(new ListRecommendationsCommand({ maxResults: 100 })),
     getTrend(),
-
     getServiceHistory()
   ])
 
-  const monthOverMonthChangePercent =
-    calculateMoMChange(
-      currentData.total,
-      previousData.total
-    )
-
-  const byService = buildServiceComparison(
-    currentData.byService,
-    previousData.byService
-  )
-
-  const topCostIncreaseDrivers =
-    buildTopCostIncreaseDrivers(
-      currentData.byService,
-      previousData.byService
-    )
+  const monthOverMonthChangePercent = calculateMoMChange(currentData.total, previousData.total)
+  const byService = buildServiceComparison(currentData.byService, previousData.byService)
+  const topCostIncreaseDrivers = buildTopCostIncreaseDrivers(currentData.byService, previousData.byService)
 
   let potentialSavings = 0
 
@@ -746,11 +707,8 @@ async function handleSummary(
       }
     })
 
-  const serviceHistoryMap =
-    buildServiceHistoryMap(serviceHistory)
-
-  const anomalies =
-    buildAnomalies(serviceHistoryMap)
+  const serviceHistoryMap = buildServiceHistoryMap(serviceHistory)
+  const anomalies = buildAnomalies(serviceHistoryMap)
 
   // There is no valid current-month Cost Explorer
   // range on the first day of the month.
@@ -778,8 +736,7 @@ async function handleSummary(
     ]
   )
 
-  const topCausalChains =
-    extractTopCausalChain(tree)
+  const topCausalChains = extractTopCausalChain(tree)
 
   const previousMap = new Map(
     previousRaw.map(g => [
@@ -790,18 +747,11 @@ async function handleSummary(
     ])
   )
 
-  const rootCauseTree =
-    enrichWithPrevious(
-      tree,
-      previousMap
-    )
+  const rootCauseTree = enrichWithPrevious(tree, previousMap)
 
   return {
-    currentMonthCost:
-      currentData.total,
-
-    previousMonthCost:
-      previousData.total,
+    currentMonthCost: currentData.total,
+    previousMonthCost: previousData.total,
 
     byService:
       currentData.byService.map(s => ({
@@ -809,34 +759,19 @@ async function handleSummary(
         cost: s.cost
       })),
 
-    byServiceComparison:
-      byService,
-
+    byServiceComparison: byService,
     topCostIncreaseDrivers,
-
     monthOverMonthChangePercent,
-
     trend,
-
     anomalies,
-
-    potentialSavings:
-      Number(
-        potentialSavings.toFixed(2)
-      ),
-
-    recommendationCount:
-      recRes.items?.length ?? 0,
-
+    potentialSavings: Number(potentialSavings.toFixed(2)),
+    recommendationCount: recRes.items?.length ?? 0,
     topRecommendations,
-
     rootCauseTree,
-
     topCausalChains,
 
     metadata: {
-      generatedAt:
-        new Date().toISOString(),
+      generatedAt: new Date().toISOString(),
 
       currency: 'USD'
     }
@@ -848,7 +783,7 @@ async function handleSummary(
  * DRILLDOWN HANDLER
  * -----------------------
  */
-async function handleDrilldown(
+const handleDrilldown = async (
   body: DrilldownRequest
 ): Promise<
   DrilldownResponse & {
@@ -860,84 +795,58 @@ async function handleDrilldown(
       nextGroupBy?: Dimension
     }
   }
-> {
-  const filters =
-    body.filters ?? []
+> => {
+  const filters = body.filters ?? []
+  const groupBy = body.groupBy
+  const start = getStartOfMonth()
+  const end = toYMD(new Date())
+  const isEmptyCurrentMonth = start === end
 
-  const groupBy =
-    body.groupBy
-
-  const start =
-    getStartOfMonth()
-
-  const end =
-    toYMD(new Date())
-
-  const isEmptyCurrentMonth =
-    start === end
-
-  // Cost Explorer requires Start < End.
-  // On the first day of the month there is no
-  // completed current-month period to drill into.
   if (isEmptyCurrentMonth) {
     const context = {
-      depth:
-        filters.length,
-
-      path:
-        filters,
-
+      depth: filters.length,
+      path: filters,
       groupBy,
-
-      nextGroupBy:
-        getNextGroupBy(groupBy)
+      nextGroupBy: getNextGroupBy(groupBy)
     }
 
     return {
       groupBy,
-
-      nextGroupBy:
-        context.nextGroupBy,
-
+      nextGroupBy: context.nextGroupBy,
       filters,
-
       items: [],
-
       total: 0,
-
       context
     }
   }
 
-  const res =
-    await ce.send(
-      new GetCostAndUsageCommand({
-        TimePeriod: {
-          Start: start,
-          End: end
-        },
+  const res = await ce.send(
+    new GetCostAndUsageCommand({
+      TimePeriod: {
+        Start: start,
+        End: end
+      },
 
-        Granularity:
-          'MONTHLY',
+      Granularity:
+        'MONTHLY',
 
-        Metrics: [
-          'UnblendedCost'
-        ],
+      Metrics: [
+        'UnblendedCost'
+      ],
 
-        GroupBy: [
-          {
-            Type: 'DIMENSION',
-            Key: groupBy
-          }
-        ],
+      GroupBy: [
+        {
+          Type: 'DIMENSION',
+          Key: groupBy
+        }
+      ],
 
-        Filter:
-          buildFilter(filters)
-      })
-    )
+      Filter:
+        buildFilter(filters)
+    })
+  )
 
-  const rawItems =
-    res.ResultsByTime?.[0]?.Groups ?? []
+  const rawItems = res.ResultsByTime?.[0]?.Groups ?? []
 
   // ----------------------------
   // BASE TRANSFORM
@@ -1016,31 +925,18 @@ async function handleDrilldown(
   // CONTEXT
   // ----------------------------
   const context = {
-    depth:
-      filters.length,
-
-    path:
-      filters,
-
+    depth: filters.length,
+    path: filters,
     groupBy,
-
-    nextGroupBy:
-      getNextGroupBy(groupBy)
+    nextGroupBy: getNextGroupBy(groupBy)
   }
 
   return {
     groupBy,
-
-    nextGroupBy:
-      context.nextGroupBy,
-
+    nextGroupBy: context.nextGroupBy,
     filters,
-
-    items:
-      enriched,
-
+    items:enriched,
     total,
-
     context
   }
 }
